@@ -1,4 +1,3 @@
-
 import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
@@ -15,7 +14,7 @@ celeba_train = datasets.CelebA(
     split="train",            # "train" | "valid" | "test" | "all"
     target_type="attr",       # or "identity", "bbox", "landmarks"
     transform=transform,
-    download=True,            # set False if already downloaded
+    download=False,            # set False if already downloaded
 )
 
 loader = DataLoader(celeba_train, batch_size=64, shuffle=True)
