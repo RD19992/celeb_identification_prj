@@ -1,4 +1,5 @@
 import torch
+import skimage
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
