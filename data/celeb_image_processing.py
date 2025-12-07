@@ -5,6 +5,7 @@ import time
 import json
 import numpy as np
 import pandas as pd
+import random
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
@@ -63,3 +64,19 @@ df.to_csv(labels_path, index=False)
 
 print("Labels salvos em:", labels_path)
 print(df.head())
+
+# Checagem visual das imagens
+
+sample = df.sample(5)
+plt.figure(figsize=(10,5))
+for i, row in enumerate(sample.itertuples()):
+    img_path = os.path.join(IMAGES_DIR, row.image_name)
+    img = io.imread(img_path)
+
+    plt.subplot(1,5,i+1)
+    plt.imshow(img)
+    plt.axis("off")
+    plt.title(f"Label: {row.label}")
+
+plt.tight_layout()
+plt.show()
