@@ -9,6 +9,7 @@ import random
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
+import cv2
 from skimage import io, color, transform
 from skimage.feature import hog, local_binary_pattern
 from sklearn.svm import SVC
@@ -77,6 +78,36 @@ for i, row in enumerate(sample.itertuples()):
     plt.imshow(img)
     plt.axis("off")
     plt.title(f"Label: {row.label}")
+
+plt.tight_layout()
+plt.show()
+
+
+# Para reduzir tempos de processamento vamos reduzir tamanho para 128 x 128
+IMG_SIZE = (128, 128)
+
+# O HOG usa somente intensidades. Vamos usar tons de cinza
+def preprocess_image_cv2(path):
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)      # uint8 [0,255]
+    img = cv2.resize(img, IMG_SIZE, interpolation=cv2.INTER_AREA)
+    return (img.astype(np.float32) / 255.0)
+
+# Amostra aleatória de 5 imagens do dataframe processado
+sample = df.sample(5, random_state=42)
+
+plt.figure(figsize=(12, 4))
+
+for i, row in enumerate(sample.itertuples(), start=1):
+    # usa o mesmo diretório das imagens originais
+    img_path = os.path.join(IMAGES_DIR, row.image_name)  # troque IMAGES_DIR se o seu nome for outro
+
+    # aplica pré-processamento para amostra de 5 imagens (128x128, escala de cinza, [0,1])
+    img = preprocess_image_cv2(img_path)
+
+    plt.subplot(1, 5, i)
+    plt.imshow(img, cmap="gray", vmin=0, vmax=1)
+    plt.title(f"Label: {row.label}")
+    plt.axis("off")
 
 plt.tight_layout()
 plt.show()
