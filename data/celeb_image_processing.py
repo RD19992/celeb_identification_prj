@@ -116,7 +116,7 @@ plt.show()
 # =========================
 
 # porcentagem das imagens a processar (1.0 = 100%, 0.1 = 10%, etc.)
-PERCENT_IMAGES = 0.01 #Fazendo HOG para 100% das imagens
+PERCENT_IMAGES = 1.0 #Fazendo HOG para 100% das imagens
 
 # número de processos paralelos (-1 = todos os núcleos)
 N_JOBS = -1
