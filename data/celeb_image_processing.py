@@ -48,3 +48,18 @@ def load_identities(identity_path: Path = IDENTITY_FILE):
 identities = load_identities()
 print("Num identities:", len(identities))
 print("Sample:", list(identities.items())[:5])
+
+# Criação de labels
+
+df = pd.read_csv(
+    IDENTITY_FILE,        # usa o Path com nome de variável
+    sep=" ",              # separador em branco
+    header=None
+)
+df.columns = ["image_name", "label"]
+
+labels_path = DATA_DIR / "labels.csv"
+df.to_csv(labels_path, index=False)
+
+print("Labels salvos em:", labels_path)
+print(df.head())
