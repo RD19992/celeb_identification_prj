@@ -1,21 +1,14 @@
 ##Importação de bibliotecas - Precisamos ver o que de fato está sendo usado e remover o que tenha implementação pronta
 
 import os
-import time
-import json
 import numpy as np
 import pandas as pd
-import random
 import matplotlib.pyplot as plt
 from pathlib import Path
-from tqdm import tqdm
 import cv2
+from joblib import Parallel, delayed, dump
 from skimage import io, color, transform
 from skimage.feature import hog, local_binary_pattern
-from sklearn.svm import SVC
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 from joblib import dump
 
 ## Configurando diretórios
@@ -111,3 +104,91 @@ for i, row in enumerate(sample.itertuples(), start=1):
 
 plt.tight_layout()
 plt.show()
+
+# =================================================
+# =================================================
+# Aplicando o metodo HOG, com execução paralela
+# =================================================
+# =================================================
+
+# =========================
+# Configurações ajustáveis para o HOG
+# =========================
+
+# porcentagem das imagens a processar (1.0 = 100%, 0.1 = 10%, etc.)
+PERCENT_IMAGES = 0.01 #Fazendo HOG para 100% das imagens
+
+# número de processos paralelos (-1 = todos os núcleos)
+N_JOBS = -1
+
+# caminho de saída do dataset HOG
+OUTPUT_PATH = "data/celeba_hog_128x128_o9.joblib"
+
+# =========================
+# FUNÇÃO HOG
+# =========================
+
+def extract_hog(img, orientations, pixels_per_cell, cells_per_block):
+    """Extrai o vetor HOG de uma imagem já em escala de cinza [0,1]."""
+    feat = hog(
+        img,
+        orientations=orientations,
+        pixels_per_cell=pixels_per_cell,
+        cells_per_block=cells_per_block,
+        block_norm="L2-Hys",
+        feature_vector=True,
+    )
+    return feat
+
+# =========================
+# FUNÇÃO AUXILIAR
+# =========================
+
+def hog_from_path(path):
+    """Lê a imagem, aplica pré-processamento e extrai HOG."""
+    img = preprocess_image_cv2(path)  # 128x128, cinza, [0,1]
+    feat = extract_hog(
+        img,
+        orientations=9,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+    )
+    return feat.astype(np.float32)
+
+# =========================
+# CONSTRUÇÃO DO DATASET
+# =========================
+
+if not (0 < PERCENT_IMAGES <= 1.0):
+    raise ValueError("PERCENT_IMAGES deve estar entre 0 e 1.")
+
+n_total = len(df)
+n_use = int(np.ceil(n_total * PERCENT_IMAGES))
+
+# amostra aleatória de PERCENT_IMAGES do dataframe
+df_subset = df.sample(n=n_use, random_state=42).reset_index(drop=True)
+
+print(f"Usando {n_use} de {n_total} imagens "
+      f"({PERCENT_IMAGES * 100:.1f}%).")
+
+# caminhos das imagens e labels correspondentes
+paths = [os.path.join(IMAGES_DIR, name) for name in df_subset["image_name"]]
+y = df_subset["label"].values.astype(np.int64)
+
+# garante que a pasta de saída exista
+os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+
+# extração de HOG em paralelo
+features = Parallel(n_jobs=N_JOBS, verbose=5)(
+    delayed(hog_from_path)(p) for p in paths
+)
+
+X = np.vstack(features)
+
+print("Shape X:", X.shape)
+print("Shape y:", y.shape)
+print("Tamanho aproximado em RAM (GB):", X.nbytes / 1024**3)
+
+# salvar com joblib
+dump({"X": X, "y": y}, OUTPUT_PATH, compress=3)
+print(f"Dataset HOG salvo em: {OUTPUT_PATH}")
