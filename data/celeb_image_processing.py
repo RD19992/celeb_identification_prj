@@ -6,9 +6,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 import cv2
-from joblib import Parallel, delayed, dump
-from skimage import io, color, transform
-from skimage.feature import hog, local_binary_pattern
+from joblib import Parallel, delayed
+from skimage import io
+from skimage.feature import hog
 from joblib import dump
 
 ## Configurando diretórios
