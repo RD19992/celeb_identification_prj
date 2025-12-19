@@ -14,7 +14,7 @@ DATASET_PATH = DATA_DIR / "celeba_hog_128x128_o9.joblib"
 print("Dataset path:", DATASET_PATH)
 print("Exists?", DATASET_PATH.exists())
 
-#Demora 30s para 30% dos dados, 2 min para tudo
+#Demora 30s-60s
 data = joblib.load(DATASET_PATH)
 X, y = data["X"], data["y"]
 
@@ -24,38 +24,39 @@ print("y:", y.shape, y.dtype)
 print("n classes:", len(np.unique(y)))
 
 # ============================
-# 1) Test: 15% do total
+# Split: 90% train, 1% val, 9% test
 # ============================
-X_temp, X_test, y_temp, y_test = train_test_split(
+TEST_FRAC_FULL = 0.09
+VAL_FRAC_FULL  = 0.01
+TRAIN_FRAC_FULL = 0.90
+
+# 1) Test: 9% do total
+X_rest, X_test, y_rest, y_test = train_test_split(
     X,
     y,
-    test_size=0.15,
+    test_size=TEST_FRAC_FULL,
     random_state=42,
-    shuffle=True      # padrão, mas deixo explícito
+    shuffle=True
+    # sem stratify (mantendo seu padrão)
+)
+
+# 2) Val: 1% do total, tirado dos 91% restantes
+#    fração dentro do restante = 0.00 / 0.91
+val_frac_rest = VAL_FRAC_FULL / (1.0 - TEST_FRAC_FULL)
+
+X_train, X_val, y_train, y_val = train_test_split(
+    X_rest,
+    y_rest,
+    test_size=val_frac_rest,
+    random_state=42,
+    shuffle=True
     # sem stratify
 )
 
-# ============================
-# 2) Intro (5%) e Holdout (80%) dentro dos 85% restantes
-# ============================
-INTRO_FRAC_FULL = 0.05
-HOLDOUT_FRAC_FULL = 0.80
-REST_FRAC = INTRO_FRAC_FULL + HOLDOUT_FRAC_FULL  # 0.85
-
-holdout_frac_rest = HOLDOUT_FRAC_FULL / REST_FRAC  # 80/85 ≈ 0.94117
-
-X_intro, X_holdout, y_intro, y_holdout = train_test_split(
-    X_temp,
-    y_temp,
-    test_size=holdout_frac_rest,
-    random_state=42,
-    shuffle=True      # também sem stratify aqui
-)
-
 # opcional: liberar memória
-del X, y, X_temp, y_temp
+del X, y, X_rest, y_rest
 
-print("Intro:",   X_intro.shape,  y_intro.shape)
-print("Holdout:", X_holdout.shape, y_holdout.shape)
-print("Test:",    X_test.shape,   y_test.shape)
-print("Total checado:", len(y_intro) + len(y_holdout) + len(y_test))
+print("Train:", X_train.shape, y_train.shape)
+print("Val:",   X_val.shape,   y_val.shape)
+print("Test:",  X_test.shape,  y_test.shape)
+print("Total checado:", len(y_train) + len(y_val) + len(y_test))
