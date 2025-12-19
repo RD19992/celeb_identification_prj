@@ -343,14 +343,14 @@ def treinar_e_avaliar_softmax(
 # Exemplo de uso (rode após seu split)
 # ============================================================
 
-# Ajuste epocas/taxa para o seu tamanho. Para 2000 classes, comece conservador e aumente.
-# modelo_softmax, y_pred_test = treinar_e_avaliar_softmax(
-#     X_train, y_train,
-#     X_test, y_test,
-#     lambda_l1=0.5, lambda_l2=0.5,
-#     taxa_aprendizado=0.05,
-#     epocas=50,
-#     tamanho_lote=256,
-#     seed=42,
-#     verbose=True
-# )
+#Ajuste epocas/taxa para o seu tamanho. Para 2000 classes, comece conservador e aumente.
+modelo_softmax, y_pred_test = treinar_e_avaliar_softmax(
+     X_train, y_train,
+     X_test, y_test,
+     lambda_l1=0.5, lambda_l2=0.5,
+     taxa_aprendizado=0.05,
+     epocas=50,
+     tamanho_lote=256,
+     seed=42,
+     verbose=True
+ )
