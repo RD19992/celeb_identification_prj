@@ -15,7 +15,7 @@ import numpy as np
 
 # 1) Transforms: keep as Tensor, then convert to numpy in HOG
 transform = transforms.Compose([
-    transforms.Resize((128, 128)),
+    transforms.Resize((64, 64)),
     transforms.ToTensor(),
 ])
 
