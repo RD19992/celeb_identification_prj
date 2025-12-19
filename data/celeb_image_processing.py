@@ -96,7 +96,7 @@ plt.tight_layout()
 plt.show()
 
 
-# Para reduzir tempos de processamento vamos reduzir tamanho para 128 x 128
+# Para reduzir tempos de processamento vamos reduzir tamanho para 64 x 64
 IMG_SIZE = (64, 64)
 
 # O HOG usa somente intensidades. Vamos usar tons de cinza
