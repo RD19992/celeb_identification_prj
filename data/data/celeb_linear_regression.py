@@ -113,13 +113,16 @@ def gradiente_descendente(
     epocas: int = 100,
     tamanho_lote: int | None = 256,
     seed: int = 42,
-    verbose: bool = True
+    verbose: bool = True,
+    mostrar_progresso_lotes: bool = True
 ):
     """
-    Otimizador por gradiente descendente (batch ou mini-batch).
+    Otimizador por gradiente descendente (batch ou mini-batch), com contador de progresso.
 
     - params_iniciais: dict de arrays/parâmetros
     - funcao_perda_grad(params, Xb, Yb) -> (perda, grads_dict)
+    - verbose: imprime perda por época
+    - mostrar_progresso_lotes: imprime contador de lotes dentro de cada época
     """
     rng = np.random.default_rng(seed)
 
@@ -132,12 +135,13 @@ def gradiente_descendente(
     if tamanho_lote is None or tamanho_lote <= 0 or tamanho_lote > n:
         tamanho_lote = n
 
+    n_lotes = int(np.ceil(n / tamanho_lote))
     historico = []
 
     for epoca in range(epocas):
         idx = rng.permutation(n)
 
-        for ini in range(0, n, tamanho_lote):
+        for num_lote, ini in enumerate(range(0, n, tamanho_lote), start=1):
             lote = idx[ini:ini + tamanho_lote]
             Xb = X[lote]
             Yb = Y[lote]
@@ -148,11 +152,22 @@ def gradiente_descendente(
             for nome_param in grads:
                 params[nome_param] = params[nome_param] - taxa_aprendizado * grads[nome_param]
 
+            # contador de progresso (lotes)
+            if mostrar_progresso_lotes:
+                print(
+                    f"[Treino] Época {epoca+1}/{epocas} | Lote {num_lote}/{n_lotes}",
+                    end="\r"
+                )
+
+        # limpa linha do progresso de lotes antes de imprimir perda
+        if mostrar_progresso_lotes:
+            print(" " * 80, end="\r")
+
+        # log por época (calcula perda no dataset todo)
         if verbose:
             perda_full, _ = funcao_perda_grad(params, X, Y)
             historico.append(float(perda_full))
-            if epocas <= 10 or (epoca % max(1, epocas // 10) == 0) or (epoca == epocas - 1):
-                print(f"[GD] Época {epoca+1}/{epocas} | perda={perda_full:.6f}")
+            print(f"[GD] Época {epoca+1}/{epocas} | perda={perda_full:.6f}")
 
     return params, historico
 
