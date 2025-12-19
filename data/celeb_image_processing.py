@@ -10,6 +10,7 @@ from joblib import Parallel, delayed
 from skimage import io
 from skimage.feature import hog
 from joblib import dump
+import math
 
 ## Configurando diretórios
 
@@ -59,7 +60,26 @@ df.to_csv(labels_path, index=False)
 print("Labels salvos em:", labels_path)
 print(df.head())
 
+#Seleção por classe
+
+TOP_CLASS_FRACTION = 0.20  # 20% das classes com mais imagens
+
+class_counts = df["label"].value_counts()  # label -> count
+n_classes = class_counts.shape[0]
+k = max(1, int(math.ceil(TOP_CLASS_FRACTION * n_classes)))
+
+top_classes = class_counts.nlargest(k).index.astype(np.int64)
+top_classes_set = set(top_classes.tolist())
+
+df_top = df[df["label"].isin(top_classes_set)].reset_index(drop=True)
+
+print(f"Top classes: {k}/{n_classes} ({100*k/n_classes:.1f}%)")
+print(f"Images kept after class filter: {len(df_top)}/{len(df)} ({100*len(df_top)/len(df):.1f}%)")
+
+
 # Checagem visual das imagens
+
+print("Sample:", list(identities.items())[:5])
 
 sample = df.sample(5)
 plt.figure(figsize=(10,5))
@@ -116,7 +136,7 @@ plt.show()
 # =========================
 
 # porcentagem das imagens a processar (1.0 = 100%, 0.1 = 10%, etc.)
-PERCENT_IMAGES = 0.3 #Fazendo HOG para 30% das imagens
+PERCENT_IMAGES = 0.05 #Fazendo HOG para 30% das imagens
 
 # número de processos paralelos (-1 = todos os núcleos)
 N_JOBS = -1
@@ -162,13 +182,12 @@ def hog_from_path(path):
 if not (0 < PERCENT_IMAGES <= 1.0):
     raise ValueError("PERCENT_IMAGES deve estar entre 0 e 1.")
 
-n_total = len(df)
+n_total = len(df_top)
 n_use = int(np.ceil(n_total * PERCENT_IMAGES))
 
-# amostra aleatória de PERCENT_IMAGES do dataframe
-df_subset = df.sample(n=n_use, random_state=42).reset_index(drop=True)
+df_subset = df_top.sample(n=n_use, random_state=42).reset_index(drop=True)
 
-print(f"Usando {n_use} de {n_total} imagens "
+print(f"Usando {n_use} de {n_total} imagens (apenas top {TOP_CLASS_FRACTION*100:.0f}% classes). "
       f"({PERCENT_IMAGES * 100:.1f}%).")
 
 # caminhos das imagens e labels correspondentes
