@@ -52,8 +52,8 @@ CONFIG = {
 
     # CV
     "k_folds": 5,
-    "cv_frac": 0.40,
-    "cv_min_por_classe": None,   # se None -> usa k_folds
+    "cv_frac": 1.00,
+    "cv_min_por_classe": 10,   # se None -> usa k_folds
     "cv_max_classes": None,      # opcional: limita nº de classes usadas no CV (acelera MUITO)
 
     # treino final
@@ -68,7 +68,7 @@ CONFIG = {
     "act_output": "softmax",      # por enquanto só softmax
 
     # Dropout
-    "dropout_hidden_p": 0.20,     # 0.0 desliga
+    "dropout_hidden_p": 0.50,     # 0.0 desliga
 
     # Inicialização automática He/Xavier
     "use_he_xavier_init": True,
@@ -119,7 +119,7 @@ CONFIG = {
     "eps_std": 1e-6,
 
     # grid L2
-    "grid_l2": [0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1],
+    "grid_l2": [0,3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1],
 
     # ========================================================
     # Early stopping
