@@ -48,8 +48,8 @@ CONFIG = {
     "final_min_por_classe": 1,
 
     # MLP
-    "hidden_units": 8,
-    "act_hidden": "tanh",   # "softmax" | "tanh" | "relu"
+    "hidden_units": 128,
+    "act_hidden": "relu",   # "softmax" | "tanh" | "relu"
     "act_output": "softmax",   # por enquanto só softmax
     "w_init_scale": 0.01,
 
@@ -62,7 +62,7 @@ CONFIG = {
     "batch_size_final": 1024,
 
     # Armijo (por época, usando probe batch)
-    "armijo_alpha0": 0.5,
+    "armijo_alpha0": 5.0,
     "armijo_growth": 1.20,
     "armijo_beta": 0.5,
     "armijo_c1": 1e-4,
