@@ -41,7 +41,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # seleção de classes (prototipagem)
-    "frac_classes": 0.05,
+    "frac_classes": 0.20,
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
 
@@ -52,7 +52,7 @@ CONFIG = {
 
     # CV
     "k_folds": 5,
-    "cv_frac": 0.20,
+    "cv_frac": 0.40,
     "cv_min_por_classe": None,   # se None -> usa k_folds
     "cv_max_classes": None,      # opcional: limita nº de classes usadas no CV (acelera MUITO)
 
