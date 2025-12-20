@@ -31,8 +31,8 @@ CONFIG = {
     #  - uma amostra menor para CV (rápido),
     #  - outra maior para o treino final (mais representativa).
     # Interpretação: fração do conjunto de TREINO (após split), não do dataset inteiro.
-    "frac_amostras_cv": 0.05,       # 5% do TREINO para CV
-    "frac_amostras_final": 0.20,    # 20% do TREINO para treino final
+    "frac_amostras_cv": 0.01,       # 1% do TREINO para CV
+    "frac_amostras_final": 1.00,    # 100% do TREINO para treino final
     "seed_amostras_cv": 123,
     "seed_amostras_final": 456,
 
@@ -42,7 +42,7 @@ CONFIG = {
 
     # treino
     "epocas_cv": 15,
-    "epocas_final": 100,
+    "epocas_final": 300,
 
     # ========================================================
     # SGD (sem Armijo): LR fixo + decaimento por época
