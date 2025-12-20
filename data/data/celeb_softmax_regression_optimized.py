@@ -24,7 +24,7 @@ CONFIG = {
     "n_min_treino_por_classe": 25,
 
     # CV
-    "k_folds": 3,
+    "k_folds": 5,
     "seed_cv": 42,
 
     # grid lambdas
