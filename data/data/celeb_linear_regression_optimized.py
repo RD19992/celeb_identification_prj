@@ -239,12 +239,11 @@ def gradiente_descendente(
                 continue
 
             # direção de descida p = -grad
-            alpha = float(taxa_aprendizado)  # alpha inicial (o seu antigo LR fixo)
+            alpha = float(taxa_aprendizado)
+            bt = max_backtracks  # <-- RESET por batch
 
-            # backtracking Armijo
             aceitou = False
             while True:
-                # params_candidate = params - alpha * grad
                 params_cand = {}
                 for nome_param in params:
                     if nome_param in grads:
@@ -254,20 +253,15 @@ def gradiente_descendente(
 
                 perda_cand, _ = funcao_perda_grad(params_cand, Xb, Yb)
 
-                # Condição de Armijo:
-                # f(x + alpha*p) <= f(x) + c*alpha*<grad, p>
-                # com p = -grad => <grad,p> = -||grad||^2
                 if perda_cand <= perda0 - c * alpha * grad_norm_sq:
                     aceitou = True
                     params = params_cand
                     break
 
                 alpha *= rho
-                if alpha < alpha_min:
+                bt -= 1
+                if alpha < alpha_min or bt <= 0:
                     break
-                if max_backtracks <= 0:
-                    break
-                max_backtracks -= 1
 
             # (opcional) se não aceitou, ainda assim dá um passo minúsculo (evita travar total)
             if not aceitou:
