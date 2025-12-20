@@ -12,14 +12,14 @@ CONFIG = {
     "dataset_filename": "celeba_hog_128x128_o9.joblib",
 
     # prototipagem
-    "frac_classes": 0.005,          # 0.5% das CLASSES ELEGÍVEIS
+    "frac_classes": 0.02,          # 0.5% das CLASSES ELEGÍVEIS
     "seed_classes": 42,
-    "min_amostras_por_classe": 50,  # mínimo no dataset inteiro
+    "min_amostras_por_classe": 20,  # mínimo no dataset inteiro
 
     # split
-    "test_frac": 0.09,
+    "test_frac": 0.20,
     "seed_split": 42,
-    "n_min_treino_por_classe": 5,
+    "n_min_treino_por_classe": 25,
 
     # CV
     "k_folds": 3,
