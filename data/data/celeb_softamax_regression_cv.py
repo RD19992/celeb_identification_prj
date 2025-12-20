@@ -26,11 +26,11 @@ CONFIG = {
     # Split treino/teste (sem validação)
     "test_frac": 0.09,
     "seed_split": 42,
-    "n_min_treino_por_classe": 1,  # garante pelo menos 1 amostra por classe no treino
+    "n_min_treino_por_classe": 5,  # garante pelo menos 1 amostra por classe no treino
 
     # Random Projection (sobre o HOG)
     # Dica: comece com 256 ou 512 pra acelerar MUITO.
-    "rp_n_components": 512,
+    "rp_n_components": 1764, # 1764 No Random Projection
     "rp_seed": 42,
 
     # CV
