@@ -27,7 +27,7 @@ CONFIG = {
     "seed_cv": 42,
 
     # amostras separadas do TREINO
-    "frac_amostras_cv": 0.01,       # 1% do TREINO para CV
+    "frac_amostras_cv": 0.05,       # 5% do TREINO para CV
     "frac_amostras_final": 1.00,    # 100% do TREINO para treino final
     "seed_amostras_cv": 123,
     "seed_amostras_final": 456,
@@ -225,22 +225,6 @@ def amostrar_para_cv_por_classes(y: np.ndarray, frac: float, seed: int, min_por_
     """
     Amostra um subconjunto do TREINO para rodar CV (grid-search), garantindo
     pelo menos `min_por_classe` exemplos por classe NO SUBSET FINAL.
-
-    [FIX #2 - Classes com 4 membros no CV]
-    A versão anterior coletava min_por_classe por classe, mas depois truncava
-    aleatoriamente para bater o "alvo" de amostras. Esse truncamento podia
-    reduzir alguma classe de 5 -> 4 (por exemplo), gerando warning/erro no
-    StratifiedKFold quando k_folds=5.
-
-    Novo comportamento (sem truncate destrutivo):
-      1) Define quantas classes cabem no alvo dado `min_por_classe`.
-      2) Coleta `min_por_classe` por classe escolhida.
-      3) Se ainda faltar para chegar perto do alvo, completa com exemplos extra
-         (round-robin) sem nunca reduzir nenhuma classe abaixo de `min_por_classe`.
-
-    Retorna:
-      - amostra_idx: índices no vetor y (treino) para formar o subset de CV
-      - classes_escolhidas: as classes incluídas nesse subset (útil para debug)
     """
     y = np.asarray(y, dtype=np.int64).ravel()
     rng = np.random.default_rng(seed)
@@ -418,7 +402,7 @@ def proximal_l1(W: np.ndarray, shrink: float) -> np.ndarray:
 
 
 # ============================================================
-# [ALTERAÇÃO] Armijo (por ÉPOCA): busca alpha no treino/CV apenas
+# Armijo (por ÉPOCA): busca alpha no treino/CV apenas
 # ============================================================
 
 def objective_batch_total(params: dict, Xb: np.ndarray, yb_idx: np.ndarray,
@@ -516,7 +500,7 @@ def treinar_softmax_elasticnet_sgd(
 
     for epoca in range(epocas):
         # ----------------------------------------------------
-        # [ALTERAÇÃO] define alpha da ÉPOCA por Armijo no TREINO
+        # Define alpha da ÉPOCA por Armijo no TREINO
         # ----------------------------------------------------
         if use_armijo:
             probe_n = min(int(CONFIG["armijo_probe_batch"]), n_train_total)
@@ -638,7 +622,7 @@ def prever(modelo: dict, X: np.ndarray):
 
 
 # ============================================================
-# [ALTERAÇÃO] Avaliação com debug: por label e por idx interno
+# Avaliação com debug: por label e por idx interno
 # ============================================================
 
 def avaliar_com_debug(nome: str, modelo: dict, X: np.ndarray, y_true_labels: np.ndarray):
@@ -1017,12 +1001,12 @@ def main():
     print(f"  backtracks_mean={st['armijo_backtracks_mean']:.2f} | backtracks_max={st['armijo_backtracks_max']}")
 
     # ========================================================
-    # [ALTERAÇÃO] Avaliar TREINO e TESTE com debug e exemplos
+    # Avaliar TREINO e TESTE com debug e exemplos
     # ========================================================
     y_pred_train = avaliar_com_debug("TREINO (final sample)", modelo_final, X_train_feat, y_train_final)
     y_pred_test = avaliar_com_debug("TESTE", modelo_final, X_test_feat, y_test)
 
-    # exemplos explícitos (sem confusão)
+    # exemplos explícitos
     mostrar_previsoes_amostrais("TREINO", y_train_final, y_pred_train, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
     mostrar_previsoes_amostrais("TESTE", y_test, y_pred_test, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
 
