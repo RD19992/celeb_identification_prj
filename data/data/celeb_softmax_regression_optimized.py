@@ -13,7 +13,7 @@ CONFIG = {
     "dataset_filename": "celeba_hog_128x128_o9.joblib",
 
     # prototipagem / seleção de classes
-    "frac_classes": 0.005,          # fração das CLASSES ELEGÍVEIS (ex.: 0.005 = 0.5%)
+    "frac_classes": 1.0,          # fração das CLASSES ELEGÍVEIS (ex.: 0.005 = 0.5%)
     "seed_classes": 42,
     "min_amostras_por_classe": 25,  # mínimo no dataset inteiro p/ ser elegível
 
@@ -21,7 +21,7 @@ CONFIG = {
     "test_frac": 0.20,
     "seed_split": 42,
     # recomendo ser < min_amostras_por_classe pra sobrar teste até quando count==min
-    "n_min_treino_por_classe": 20,
+    "n_min_treino_por_classe": 25,
 
     # CV
     "k_folds": 3,
