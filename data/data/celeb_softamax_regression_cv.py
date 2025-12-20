@@ -5,86 +5,73 @@ from itertools import product
 from sklearn.model_selection import StratifiedKFold
 
 # ============================================================
-# CONFIG (ajuste aqui para prototipagem rápida)
+# CONFIG
 # ============================================================
 
 CONFIG = {
-    # Dataset
     "dataset_filename": "celeba_hog_128x128_o9.joblib",
 
-    # Seleção de classes ANTES do split (prototipagem)
-    "frac_classes": 0.005,         # <- pedido: 0.005
+    # prototipagem
+    "frac_classes": 0.005,          # 0.5% das CLASSES ELEGÍVEIS
     "seed_classes": 42,
+    "min_amostras_por_classe": 50,  # mínimo no dataset inteiro
 
-    # mínimo de amostras por classe no filtro inicial
-    "min_amostras_por_classe": 50,  # <- pedido: 50
-
-    # Split treino/teste (sem validação)
+    # split
     "test_frac": 0.09,
     "seed_split": 42,
-
-    # garante pelo menos N amostras por classe no treino
     "n_min_treino_por_classe": 5,
 
     # CV
     "k_folds": 3,
     "seed_cv": 42,
 
-    # Grid de lambdas (Elastic Net)
+    # lambdas
     "lambda_l1_grid": [0.0, 0.05, 0.1, 0.5],
     "lambda_l2_grid": [0.0, 0.05, 0.1, 0.5],
 
-    # Treino por GD com Armijo (taxa_aprendizado = alpha inicial do Armijo)
-    # <- pedido: aumentar alpha inicial
+    # treino
     "epocas_cv": 15,
     "epocas_final": 30,
-    "taxa_aprendizado": 10.0,   # <- AQUI: alpha inicial grande (Armijo faz backtracking se preciso)
-    "tamanho_lote": 256,
 
-    # Progresso do GD
+    # (1) Armijo alpha inicial grande
+    "taxa_aprendizado": 10.0,
+
+    "tamanho_lote": 256,
     "imprimir_a_cada_n_lotes": 25,
 
-    # Padronização (z-score)
+    # (2) z-score
     "std_eps": 1e-8,
 
-    # Output
+    # output
     "n_exemplos_previsao": 10,
-    "exemplos_de": "teste",  # "teste" ou "treino"
+    "exemplos_de": "teste",
 
-    # Diagnóstico
+    # diagnóstico
     "diag_seed": 42,
     "diag_max_amostras_prob": 5000,
 }
 
 # ============================================================
-# Utilitários
+# Diagnóstico HOG
 # ============================================================
 
 def diagnostico_dim_hog(d: int):
-    """
-    Diagnóstico heurístico do tamanho do HOG.
-    Com parâmetros típicos (o=9, cell=8x8, block=2x2):
-      - 64x64 -> 1764
-      - 128x128 -> 8100
-    Também estima IMG_SIZE provável caso d seja diferente.
-    """
     print("\n[Diagnóstico HOG] Dimensão de features (d) =", d)
-
     if d == 1764:
-        print("[Diagnóstico HOG] d=1764 sugere HOG de 64x64 (o9, cell8, block2).")
+        print("[Diagnóstico HOG] d=1764 sugere HOG 64x64 (o9, cell8, block2).")
         return
     if d == 8100:
-        print("[Diagnóstico HOG] d=8100 sugere HOG de 128x128 (o9, cell8, block2).")
+        print("[Diagnóstico HOG] d=8100 sugere HOG 128x128 (o9, cell8, block2).")
         return
 
-    # Estimativa aproximada assumindo:
-    # dims = (cells-1)^2 * (2*2*9) = 36*(cells-1)^2, com cells = IMG/8
-    # d ≈ 36*(IMG/8 - 1)^2  => IMG ≈ 8*(sqrt(d/36)+1)
     est_cells_minus_1 = np.sqrt(max(d, 1) / 36.0)
     est_img = 8.0 * (est_cells_minus_1 + 1.0)
     print("[Diagnóstico HOG] d não bate com 64x64/128x128 típicos.")
     print(f"[Diagnóstico HOG] Estimativa grosseira de IMG_SIZE ≈ {est_img:.1f}px (assumindo o9, cell8, block2).")
-    print("[Diagnóstico HOG] Se isso estiver errado, confirme parâmetros do HOG e se o joblib carregado é o esperado.")
+
+# ============================================================
+# Utilitários
+# ============================================================
 
 def codificar_rotulos_com_classes(y: np.ndarray, classes: np.ndarray):
     classes = np.asarray(classes)
@@ -117,7 +104,7 @@ def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_trai
     return X_train[mask_tr], y_train[mask_tr], X_test[mask_te], y_test[mask_te], classes_ok
 
 # ============================================================
-# Padronização: (X - mean_train) / (std_train + eps)
+# (2) Padronização (z-score) com stats do treino
 # ============================================================
 
 def fit_standardizer(X_train: np.ndarray, eps: float):
@@ -132,29 +119,36 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return (X - mean) / std
 
 # ============================================================
-# Seleção de classes ANTES do split
+# Seleção de classes (CORRIGIDA): elegíveis primeiro
 # ============================================================
 
-def selecionar_classes_aleatorias(X, y, frac_classes: float, seed: int, min_amostras_por_classe: int):
+def selecionar_classes_aleatorias_entre_elegiveis(X, y, frac_classes: float, seed: int, min_amostras_por_classe: int):
+    """
+    1) encontra classes elegíveis no dataset inteiro: count >= min_amostras_por_classe
+    2) sorteia uma fração dentre as elegíveis
+    3) filtra X,y para ficar só com essas classes
+
+    Isso evita o caso comum: sorteia poucas classes e depois todas morrem no filtro.
+    """
     rng = np.random.default_rng(seed)
-    classes = np.unique(y)
-    n_classes_total = len(classes)
 
-    n_escolher = max(1, int(np.round(frac_classes * n_classes_total)))
-    escolhidas = rng.choice(classes, size=n_escolher, replace=False)
+    classes_all, counts_all = np.unique(y, return_counts=True)
+    elegiveis = classes_all[counts_all >= min_amostras_por_classe]
 
+    print(f"[Seleção] Classes elegíveis (>= {min_amostras_por_classe} amostras): {len(elegiveis)} de {len(classes_all)}")
+
+    if len(elegiveis) == 0:
+        return X[:0], y[:0], elegiveis  # vazio
+
+    n_escolher = max(1, int(np.round(frac_classes * len(elegiveis))))
+    n_escolher = min(n_escolher, len(elegiveis))
+
+    escolhidas = rng.choice(elegiveis, size=n_escolher, replace=False)
     mask = np.isin(y, escolhidas)
-    X2, y2 = X[mask], y[mask]
-
-    c2, counts = np.unique(y2, return_counts=True)
-    classes_ok = c2[counts >= min_amostras_por_classe]
-    mask2 = np.isin(y2, classes_ok)
-
-    X3, y3 = X2[mask2], y2[mask2]
-    return X3, y3, classes_ok
+    return X[mask], y[mask], escolhidas
 
 # ============================================================
-# Split garantindo pelo menos n_min_treino_por_classe no treino
+# Split garantindo treino por classe
 # ============================================================
 
 def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_treino_por_classe: int = 1):
@@ -173,7 +167,6 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
     for s, e in zip(start_idx, end_idx):
         grp = order[s:e]
         rng.shuffle(grp)
-
         take = min(n_min_treino_por_classe, len(grp))
         train_idx.append(grp[:take])
         resto_idx.append(grp[take:])
@@ -185,7 +178,6 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
         test_n = len(resto_idx)
 
     test_idx = rng.choice(resto_idx, size=test_n, replace=False)
-
     test_set = set(test_idx.tolist())
     resto_para_treino = np.array([i for i in resto_idx if i not in test_set], dtype=np.int64)
 
@@ -196,7 +188,7 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
     return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
 # ============================================================
-# GD com Armijo (backtracking) + progresso + stats
+# GD com Armijo (backtracking)
 # ============================================================
 
 def gradiente_descendente(
@@ -204,7 +196,7 @@ def gradiente_descendente(
     funcao_perda_grad,
     X: np.ndarray,
     Y: np.ndarray,
-    taxa_aprendizado: float,   # alpha inicial (Armijo parte daqui e reduz se necessário)
+    taxa_aprendizado: float,   # alpha inicial
     epocas: int,
     tamanho_lote: int | None,
     seed: int,
@@ -255,7 +247,7 @@ def gradiente_descendente(
             if grad_norm_sq <= 0.0:
                 continue
 
-            alpha = float(taxa_aprendizado)  # <- agora começa grande (por CONFIG)
+            alpha = float(taxa_aprendizado)  # <- começa grande (CONFIG=10.0)
             bt = max_backtracks
 
             aceitou = False
@@ -304,7 +296,7 @@ def gradiente_descendente(
     return params, historico, stats
 
 # ============================================================
-# Softmax + Weighted Cross-Entropy + Elastic Net (/m correto)
+# Softmax + Weighted CE + Elastic Net
 # ============================================================
 
 def compute_class_weights_from_yidx(y_idx: np.ndarray, K: int, eps: float = 1e-12) -> np.ndarray:
@@ -318,34 +310,30 @@ def perda_e_gradiente_softmax_wce_elasticnet(
     params,
     X,
     Y,
-    class_weights,   # shape (K,)
+    class_weights,
     lambda_l1,
     lambda_l2,
     eps: float = 1e-12
 ):
-    W = params["W"]  # (K, d)
-    b = params["b"]  # (K,)
+    W = params["W"]
+    b = params["b"]
     m = X.shape[0]
     if m <= 0:
         return 0.0, {"W": np.zeros_like(W), "b": np.zeros_like(b)}
 
-    logits = X @ W.T + b  # (m, K)
-
+    logits = X @ W.T + b
     z = logits - np.max(logits, axis=1, keepdims=True)
     expz = np.exp(z)
-    sumexp = np.sum(expz, axis=1, keepdims=True)
-    P = expz / (sumexp + eps)
+    P = expz / (np.sum(expz, axis=1, keepdims=True) + eps)
 
-    w_per_sample = (Y * class_weights[None, :]).sum(axis=1)  # (m,)
-
-    logp_true = np.sum(Y * np.log(P + eps), axis=1)           # (m,)
+    w_per_sample = (Y * class_weights[None, :]).sum(axis=1)
+    logp_true = np.sum(Y * np.log(P + eps), axis=1)
     wce = -np.mean(w_per_sample * logp_true)
 
     reg = (lambda_l1 * np.sum(np.abs(W)) + 0.5 * lambda_l2 * np.sum(W * W)) / m
     loss = wce + reg
 
-    dlogits = (w_per_sample[:, None] * (P - Y)) / m          # (m, K)
-
+    dlogits = (w_per_sample[:, None] * (P - Y)) / m
     grad_W = dlogits.T @ X
     grad_b = np.sum(dlogits, axis=0)
 
@@ -415,19 +403,10 @@ def prever_regressao_linear_multiclasse(modelo, X):
     return classes[idx_pred], logits
 
 # ============================================================
-# Diagnóstico
+# Diagnóstico (pós-treino)
 # ============================================================
 
-def diagnostico_modelo(
-    *,
-    modelo,
-    y_train,
-    y_pred_train,
-    logits_train=None,
-    titulo: str = "Diagnóstico",
-    max_amostras_prob: int = 5000,
-    seed: int = 42
-):
+def diagnostico_modelo(modelo, y_train, y_pred_train, logits_train=None, titulo="Diagnóstico", max_amostras_prob=5000, seed=42):
     rng = np.random.default_rng(seed)
     classes = modelo["classes"]
     K = len(classes)
@@ -441,42 +420,28 @@ def diagnostico_modelo(
 
     vals, cnt = np.unique(y_train, return_counts=True)
     maj = float(np.max(cnt) / n) if n > 0 else 0.0
-    print(f"Baseline maioria (classe mais frequente) = {maj:.6f}")
-    print(f"Distribuição y_train: min={int(np.min(cnt))} | med={int(np.median(cnt))} | max={int(np.max(cnt))}")
+    print(f"Baseline maioria = {maj:.6f} | y_train min/med/max = {int(np.min(cnt))}/{int(np.median(cnt))}/{int(np.max(cnt))}")
 
     vals_p, cnt_p = np.unique(y_pred_train, return_counts=True)
     cobertura = len(vals_p) / max(K, 1)
     top = np.argsort(cnt_p)[::-1][:10]
-    print(f"Predições únicas = {len(vals_p)}/{K}  (cobertura={cobertura:.3f})")
+    print(f"Predições únicas = {len(vals_p)}/{K} (cobertura={cobertura:.3f})")
     print("Top-10 classes preditas (classe, count, fração):")
     for i in top:
         print(f"  {int(vals_p[i])} | {int(cnt_p[i])} | {cnt_p[i] / n:.4f}")
 
     W = modelo["W"]
     absW = np.abs(W)
-    w_l2 = float(np.linalg.norm(W))
-    w_l1 = float(np.sum(absW))
-    w_max = float(np.max(absW))
-    spars = float(np.mean(absW < 1e-10))
-    print(f"||W||_2 = {w_l2:.6e} | ||W||_1 = {w_l1:.6e} | max|W| = {w_max:.6e} | sparsity(|W|<1e-10)={spars:.3f}")
-
-    b = modelo["b"]
-    print(f"b: mean={float(np.mean(b)):.3e} | std={float(np.std(b)):.3e} | min={float(np.min(b)):.3e} | max={float(np.max(b)):.3e}")
-
-    cw = modelo.get("class_weights")
-    if cw is not None:
-        print(f"class_weights: min={float(np.min(cw)):.4f} | med={float(np.median(cw)):.4f} | max={float(np.max(cw)):.4f}")
+    print(f"||W||_2={float(np.linalg.norm(W)):.3e} | max|W|={float(np.max(absW)):.3e} | sparsity(|W|<1e-10)={float(np.mean(absW<1e-10)):.3f}")
 
     if logits_train is not None and n > 0:
         m = min(n, max_amostras_prob)
         idx = rng.choice(n, size=m, replace=False)
-
         L = logits_train[idx]
         z = L - np.max(L, axis=1, keepdims=True)
         expz = np.exp(z)
         P = expz / (np.sum(expz, axis=1, keepdims=True) + 1e-12)
         pmax = np.max(P, axis=1)
-
         print(f"Confiança (amostra={m}): mean(max softmax)={float(np.mean(pmax)):.4f} | med={float(np.median(pmax)):.4f} | p90={float(np.quantile(pmax, 0.90)):.4f}")
 
     st = modelo.get("gd_stats", {})
@@ -486,30 +451,25 @@ def diagnostico_modelo(
         fb = int(st.get("armijo_fallback", 0))
         alpha_mean = float(st.get("alpha_sum", 0.0)) / upd
         bt_mean = float(st.get("backtracks_sum", 0)) / upd
-        print(f"Armijo: aceitou={acc}/{upd} ({acc/upd:.2%}) | fallback={fb}/{upd} ({fb/upd:.2%}) | alpha_médio={alpha_mean:.3e} | backtracks_médio={bt_mean:.2f}")
+        print(f"Armijo: aceitou={acc}/{upd} ({acc/upd:.1%}) | fallback={fb}/{upd} ({fb/upd:.1%}) | alpha_médio={alpha_mean:.2e} | backtracks_médio={bt_mean:.2f}")
 
     print("=" * 72 + "\n")
 
 # ============================================================
-# K-Fold CV para escolher lambdas
+# CV
 # ============================================================
 
-def escolher_melhores_lambdas_por_cv(
-    X_train, y_train, classes_fixas,
-    lambda_l1_grid, lambda_l2_grid,
-    k_folds, seed_cv,
-    treino_cfg
-):
+def escolher_melhores_lambdas_por_cv(X_train, y_train, classes_fixas, lambda_l1_grid, lambda_l2_grid, k_folds, seed_cv, treino_cfg):
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed_cv)
     combos = list(product(lambda_l1_grid, lambda_l2_grid))
-    melhor = None  # (mean_err, l1, l2)
+    melhor = None
 
     total_combos = len(combos)
-    print(f"[CV] Iniciando grid-search: {total_combos} combinações | {k_folds}-fold (estratificado)")
+    print(f"[CV] Grid-search: {total_combos} combinações | {k_folds}-fold estratificado")
 
     for c_idx, (l1, l2) in enumerate(combos, start=1):
         erros = []
-        print(f"\n[CV] Combo {c_idx}/{total_combos}: lambda_l1={l1} | lambda_l2={l2}")
+        print(f"\n[CV] Combo {c_idx}/{total_combos}: l1={l1} | l2={l2}")
 
         for f_idx, (tr_idx, va_idx) in enumerate(skf.split(X_train, y_train), start=1):
             X_tr, y_tr = X_train[tr_idx], y_train[tr_idx]
@@ -534,16 +494,16 @@ def escolher_melhores_lambdas_por_cv(
             print(f"[CV]  Fold {f_idx}/{k_folds} - erro={err:.4f}")
 
         mean_err = float(np.mean(erros))
-        print(f"[CV] Média erro (combo {c_idx}/{total_combos}) = {mean_err:.4f}")
+        print(f"[CV] Média erro = {mean_err:.4f}")
 
         if (melhor is None) or (mean_err < melhor[0]):
             melhor = (mean_err, l1, l2)
-            print(f"[CV] ** Novo melhor até agora: erro={mean_err:.4f} | l1={l1} | l2={l2}")
+            print(f"[CV] ** Novo melhor: erro={mean_err:.4f} | l1={l1} | l2={l2}")
 
     return melhor
 
 # ============================================================
-# PIPELINE PRINCIPAL (SEM L2-NORM, COM Z-SCORE)
+# MAIN
 # ============================================================
 
 def main():
@@ -561,27 +521,32 @@ def main():
     print("y:", y.shape, y.dtype)
     print("n classes:", len(np.unique(y)))
 
-    # Diagnóstico inicial do tamanho do HOG (d)
     diagnostico_dim_hog(int(X.shape[1]))
 
-    # Seleção de classes ANTES do split
+    # ---- seleção corrigida
     print(
-        f"\n[Etapa 1/5] Selecionando {CONFIG['frac_classes']*100:.3f}% das classes (seed={CONFIG['seed_classes']}) "
+        f"\n[Etapa 1/5] Selecionando {CONFIG['frac_classes']*100:.3f}% das classes ELEGÍVEIS (seed={CONFIG['seed_classes']}) "
         f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe..."
     )
-    X, y, _ = selecionar_classes_aleatorias(
+    X, y, escolhidas = selecionar_classes_aleatorias_entre_elegiveis(
         X, y,
         frac_classes=CONFIG["frac_classes"],
         seed=CONFIG["seed_classes"],
         min_amostras_por_classe=CONFIG["min_amostras_por_classe"]
     )
-    print("[Etapa 1/5] Após filtro:")
-    print("  X:", X.shape, " | n classes:", len(np.unique(y)))
 
-    # Split treino/teste
+    if X.shape[0] == 0:
+        print("\n[ERRO] Após filtro, não sobrou nenhuma amostra.")
+        print("Sugestões: diminua min_amostras_por_classe, ou aumente frac_classes, ou ambos.")
+        return
+
+    print("[Etapa 1/5] Após filtro:")
+    print("  X:", X.shape, "| n classes:", len(np.unique(y)), "| classes escolhidas:", len(escolhidas))
+
+    # split
     print(
         f"\n[Etapa 2/5] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
-        f"garantindo {CONFIG['n_min_treino_por_classe']}+ amostras/classe no treino..."
+        f"garantindo {CONFIG['n_min_treino_por_classe']}+ no treino..."
     )
     X_train, X_test, y_train, y_test = split_garantindo_treino_por_classe(
         X, y,
@@ -590,43 +555,33 @@ def main():
         n_min_treino_por_classe=CONFIG["n_min_treino_por_classe"]
     )
 
-    # Garante CV viável (cada classe precisa >= k_folds no treino)
-    print(f"\n[Etapa 3/5] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (para CV estratificado)...")
+    # garante CV viável (>= k_folds por classe no treino)
+    print(f"\n[Etapa 3/5] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (para CV)...")
     X_train, y_train, X_test, y_test, _ = filtrar_classes_min_train_para_cv(
         X_train, y_train, X_test, y_test, min_train_por_classe=CONFIG["k_folds"]
     )
 
+    if X_train.shape[0] == 0 or len(np.unique(y_train)) == 0:
+        print("\n[ERRO] Após garantir CV, não sobrou treino suficiente.")
+        print("Sugestões: aumente frac_classes ou reduza min_amostras_por_classe.")
+        return
+
     print("[Etapa 3/5] Shapes após filtro p/ CV:")
     print("  Train:", X_train.shape, y_train.shape, "| n classes:", len(np.unique(y_train)))
-    print("  Test :", X_test.shape, y_test.shape,  "| n classes:", len(np.unique(y_test)))
+    print("  Test :", X_test.shape, y_test.shape, "| n classes:", len(np.unique(y_test)))
 
-    # ===============================
-    # Padronização (z-score) SOMENTE
-    # ===============================
-    print("\n[Etapa 3.5/5] Padronizando features: (X - mean_train) / (std_train + eps) ...")
+    # ---- (2) z-score apenas
+    print("\n[Etapa 3.5/5] Padronizando: (X - mean_train) / (std_train + eps)")
     mean_train, std_train = fit_standardizer(X_train, eps=CONFIG["std_eps"])
     X_train_feat = apply_standardizer(X_train, mean_train, std_train)
     X_test_feat = apply_standardizer(X_test, mean_train, std_train)
 
-    # Classes fixas
     classes_fixas = np.unique(y_train)
 
-    # Diagnóstico pré-CV (somente baselines)
-    y_pred_dummy = np.full_like(y_train, fill_value=classes_fixas[0])
-    diagnostico_modelo(
-        modelo={"W": np.zeros((len(classes_fixas), X_train_feat.shape[1])), "b": np.zeros(len(classes_fixas)), "classes": classes_fixas, "gd_stats": {}},
-        y_train=y_train.astype(np.int64),
-        y_pred_train=y_pred_dummy.astype(np.int64),
-        logits_train=None,
-        titulo="Diagnóstico PRÉ-CV (apenas dataset/baselines)",
-        max_amostras_prob=CONFIG["diag_max_amostras_prob"],
-        seed=CONFIG["diag_seed"]
-    )
-
-    # CV para escolher lambdas
-    print(f"\n[Etapa 4/5] K-Fold CV (k={CONFIG['k_folds']}) para escolher lambdas...")
+    # CV
+    print(f"\n[Etapa 4/5] CV estratificado (k={CONFIG['k_folds']}) para escolher lambdas...")
     treino_cfg = {
-        "taxa_aprendizado": CONFIG["taxa_aprendizado"],  # <- alpha inicial alto
+        "taxa_aprendizado": CONFIG["taxa_aprendizado"],
         "epocas_cv": CONFIG["epocas_cv"],
         "tamanho_lote": CONFIG["tamanho_lote"],
         "seed_treino": 123,
@@ -641,10 +596,10 @@ def main():
         treino_cfg=treino_cfg
     )
     best_mean_err, best_l1, best_l2 = best
-    print(f"\n[CV] Melhor combinação final: mean_err={best_mean_err:.4f} | lambda_l1={best_l1} | lambda_l2={best_l2}")
+    print(f"\n[CV] Melhor: mean_err={best_mean_err:.4f} | l1={best_l1} | l2={best_l2}")
 
-    # Treina modelo final no treino inteiro
-    print(f"\n[Etapa 5/5] Treinando modelo final no treino inteiro (epocas={CONFIG['epocas_final']})...")
+    # treino final
+    print(f"\n[Etapa 5/5] Treinando modelo final (epocas={CONFIG['epocas_final']})...")
     modelo_final = treinar_regressao_linear_multiclasse_elasticnet(
         X_train_feat, y_train, classes_fixas,
         lambda_l1=best_l1,
@@ -657,14 +612,13 @@ def main():
         imprimir_a_cada_n_lotes=CONFIG["imprimir_a_cada_n_lotes"],
     )
 
-    # Erro no treino do melhor modelo
+    # erro treino
     y_pred_train, logits_train = prever_regressao_linear_multiclasse(modelo_final, X_train_feat)
     erro_treino = calcular_erro_classificacao(y_train.astype(np.int64), y_pred_train.astype(np.int64))
-    print(f"\n[Resultado] Erro no conjunto de TREINO (melhor modelo): {erro_treino:.4f} | Acurácia: {1.0-erro_treino:.4f}")
+    print(f"\n[Resultado] Erro no TREINO: {erro_treino:.4f} | Acurácia: {1.0-erro_treino:.4f}")
 
-    # Diagnóstico pós-treino
     diagnostico_modelo(
-        modelo=modelo_final,
+        modelo_final,
         y_train=y_train.astype(np.int64),
         y_pred_train=y_pred_train.astype(np.int64),
         logits_train=logits_train,
@@ -673,7 +627,7 @@ def main():
         seed=CONFIG["diag_seed"]
     )
 
-    # Exemplos de previsão
+    # exemplos
     if CONFIG["exemplos_de"].lower() == "treino":
         y_true_ex, y_pred_ex = y_train, y_pred_train
     else:
