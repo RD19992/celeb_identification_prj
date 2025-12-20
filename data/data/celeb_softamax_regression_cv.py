@@ -502,6 +502,140 @@ def escolher_melhores_lambdas_por_cv(X_train, y_train, classes_fixas, lambda_l1_
 
     return melhor
 
+def _fmt_int(x: int, w: int) -> str:
+    return str(int(x)).rjust(w)
+
+def _fmt_float(x: float, w: int, d: int = 3) -> str:
+    return f"{x:.{d}f}".rjust(w)
+
+def imprimir_matriz_confusao(cm: np.ndarray, row_labels, col_labels, titulo: str, normalize_rows: bool = True):
+    """
+    cm: (R, C)
+    row_labels: lista de labels das linhas (R)
+    col_labels: lista de labels das colunas (C)
+    """
+    R, C = cm.shape
+    row_labels = [str(x) for x in row_labels]
+    col_labels = [str(x) for x in col_labels]
+
+    # larguras
+    w_label = max(6, max(len(s) for s in row_labels))
+    w_cell = max(5, max(len(str(int(cm.max()))), max(len(s) for s in col_labels)))
+
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+
+    # header
+    header = " " * (w_label + 2) + " ".join(s.rjust(w_cell) for s in col_labels) + " | " + "sum".rjust(w_cell)
+    print(header)
+    print("-" * len(header))
+
+    # rows
+    for i in range(R):
+        row = cm[i]
+        s = int(row.sum())
+        line = row_labels[i].rjust(w_label) + "  " + " ".join(_fmt_int(v, w_cell) for v in row) + " | " + _fmt_int(s, w_cell)
+        print(line)
+
+        if normalize_rows and s > 0:
+            frac = row.astype(np.float64) / s
+            line2 = (" " * w_label) + "  " + " ".join(_fmt_float(v, w_cell, d=3) for v in frac) + " | " + _fmt_float(1.0, w_cell, d=3)
+            print(line2)
+
+    print("=" * 72 + "\n")
+
+def avaliar_teste_top10(
+    y_test: np.ndarray,
+    y_pred_test: np.ndarray,
+    top_k: int = 10,
+    seed: int = 42
+):
+    y_test = y_test.astype(np.int64, copy=False)
+    y_pred_test = y_pred_test.astype(np.int64, copy=False)
+
+    n = len(y_test)
+    if n == 0:
+        print("\n[Teste] Conjunto de teste vazio — nada para avaliar.")
+        return
+
+    acc = float(np.mean(y_test == y_pred_test))
+    err = 1.0 - acc
+    print(f"\n[Resultado TESTE] Erro: {err:.4f} | Acurácia: {acc:.4f} | N={n}")
+
+    # Top-K classes mais comuns no TESTE
+    classes, counts = np.unique(y_test, return_counts=True)
+    order = np.argsort(counts)[::-1]
+    k = min(top_k, len(classes))
+    top_classes = classes[order[:k]]
+    top_counts = counts[order[:k]]
+
+    print(f"\n[Teste] Top-{k} classes mais comuns (classe, count, fração no teste):")
+    for c, cnt in zip(top_classes.tolist(), top_counts.tolist()):
+        print(f"  {int(c)} | {int(cnt)} | {cnt / n:.4f}")
+
+    # Confusão: linhas = verdadeiro (top-k), colunas = predito (top-k + OUT)
+    mapa = {int(c): i for i, c in enumerate(top_classes.tolist())}
+    OUT = k  # última coluna = OUT (pred fora do top-k)
+    cm = np.zeros((k, k + 1), dtype=np.int64)
+
+    for yt, yp in zip(y_test, y_pred_test):
+        yt_i = mapa.get(int(yt), None)
+        if yt_i is None:
+            continue  # só avaliamos as linhas do top-k (verdadeiro)
+        yp_j = mapa.get(int(yp), OUT)
+        cm[yt_i, yp_j] += 1
+
+    col_labels = [int(c) for c in top_classes.tolist()] + ["OUT"]
+    row_labels = [int(c) for c in top_classes.tolist()]
+
+    imprimir_matriz_confusao(
+        cm,
+        row_labels=row_labels,
+        col_labels=col_labels,
+        titulo=f"[Teste] Matriz de confusão (verdadeiro ∈ top-{k}; col=top-{k}+OUT). Linhas normalizadas abaixo.",
+        normalize_rows=True
+    )
+
+    # Métricas por classe (top-k) usando TODO o teste (precision “real”)
+    print(f"[Teste] Métricas por classe (top-{k}) no teste inteiro:")
+    print("classe | suporte | precision | recall | f1 | top-3 confusões (pred)")
+    print("-" * 72)
+
+    for c in top_classes.tolist():
+        c = int(c)
+        tp = int(np.sum((y_test == c) & (y_pred_test == c)))
+        fp = int(np.sum((y_test != c) & (y_pred_test == c)))
+        fn = int(np.sum((y_test == c) & (y_pred_test != c)))
+        sup = int(np.sum(y_test == c))
+
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+
+        # top-3 confusões: para essa classe verdadeira, quais predições aparecem mais (excluindo acerto)
+        mask_c = (y_test == c)
+        preds_c = y_pred_test[mask_c]
+        if len(preds_c) > 0:
+            vals, cnts = np.unique(preds_c, return_counts=True)
+            ord2 = np.argsort(cnts)[::-1]
+            conf_list = []
+            for idx in ord2:
+                lab = int(vals[idx])
+                if lab == c:
+                    continue
+                conf_list.append(f"{lab}:{int(cnts[idx])}")
+                if len(conf_list) >= 3:
+                    break
+            conf_txt = ", ".join(conf_list) if conf_list else "-"
+        else:
+            conf_txt = "-"
+
+        print(f"{c:>6} | {sup:>7} | {prec:>9.3f} | {rec:>6.3f} | {f1:>4.3f} | {conf_txt}")
+
+    print("-" * 72)
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -640,6 +774,19 @@ def main():
         n_amostras=CONFIG["n_exemplos_previsao"],
         seed=CONFIG["seed_split"]
     )
+
+    # ============================================================
+    # Avaliação final no TESTE: acurácia + confusão top-10
+    # ============================================================
+    print("\n[Etapa Extra] Avaliando no TESTE (acurácia + matriz de confusão top-10)...")
+    y_pred_test_full, _ = prever_regressao_linear_multiclasse(modelo_final, X_test_feat)
+    avaliar_teste_top10(
+        y_test=y_test,
+        y_pred_test=y_pred_test_full,
+        top_k=10,
+        seed=CONFIG.get("seed_split", 42)
+    )
+
 
 if __name__ == "__main__":
     main()
