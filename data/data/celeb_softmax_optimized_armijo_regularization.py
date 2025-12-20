@@ -35,7 +35,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # seleção de classes (prototipagem)
-    "frac_classes": 0.10,
+    "frac_classes": 1.00,
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
 
@@ -56,7 +56,7 @@ CONFIG = {
 
     # treinamento (separados)
     "epochs_cv": 20,
-    "epochs_final": 200,
+    "epochs_final": 150,
 
     # minibatch
     "batch_size_cv": 1024,
