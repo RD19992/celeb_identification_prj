@@ -2,7 +2,7 @@
 """
 CELEBA HOG -> Softmax Regression (do zero, GD + Armijo) com CV estratificado.
 
-CORREÇÕES IMPORTANTES NESTA VERSÃO (pedido do usuário):
+CORREÇÕES IMPORTANTES NESTA VERSÃO:
 1) [FIX CV 4 MEMBROS] A amostragem para CV agora GARANTE >= k amostras por classe,
    evitando o warning do StratifiedKFold (classe com 4 membros quando k=5).
    - Antes: amostrava classes até passar do alvo e depois "cortava" (truncate) globalmente,

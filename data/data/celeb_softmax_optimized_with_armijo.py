@@ -221,7 +221,7 @@ def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_trai
 #   - Final: pega fração por classe, restrita às classes do CV
 # ============================================================
 
-def amostrar_para_cv_por_classes(y: np.ndarray, frac_amostras: float, min_por_classe: int, seed: int):
+def amostrar_para_cv_por_classes(y: np.ndarray, frac: float, seed: int, min_por_classe: int):
     """
     Amostra um subconjunto do TREINO para rodar CV (grid-search), garantindo
     pelo menos `min_por_classe` exemplos por classe NO SUBSET FINAL.
@@ -232,38 +232,42 @@ def amostrar_para_cv_por_classes(y: np.ndarray, frac_amostras: float, min_por_cl
     reduzir alguma classe de 5 -> 4 (por exemplo), gerando warning/erro no
     StratifiedKFold quando k_folds=5.
 
-    Novo comportamento:
+    Novo comportamento (sem truncate destrutivo):
       1) Define quantas classes cabem no alvo dado `min_por_classe`.
       2) Coleta `min_por_classe` por classe escolhida.
       3) Se ainda faltar para chegar perto do alvo, completa com exemplos extra
-         sem nunca reduzir nenhuma classe abaixo de `min_por_classe`.
+         (round-robin) sem nunca reduzir nenhuma classe abaixo de `min_por_classe`.
+
+    Retorna:
+      - amostra_idx: índices no vetor y (treino) para formar o subset de CV
+      - classes_escolhidas: as classes incluídas nesse subset (útil para debug)
     """
     y = np.asarray(y, dtype=np.int64).ravel()
     rng = np.random.default_rng(seed)
 
     N = int(len(y))
     if N == 0:
-        return np.array([], dtype=np.int64)
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
-    # alvo ~ "número de amostras" (aproximado). Garante pelo menos min_por_classe.
-    alvo = max(int(min_por_classe), int(np.round(frac_amostras * N)))
+    # alvo ~ número de amostras (aproximado). Sempre >= min_por_classe.
+    alvo = max(int(min_por_classe), int(np.round(float(frac) * N)))
 
     classes_all, counts_all = np.unique(y, return_counts=True)
     classes_ok = classes_all[counts_all >= min_por_classe]
 
     if len(classes_ok) == 0:
-        return np.array([], dtype=np.int64)
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
     # Quantas classes cabem no alvo se pegarmos min_por_classe por classe.
     n_classes_take = max(1, alvo // int(min_por_classe))
     n_classes_take = min(n_classes_take, len(classes_ok))
 
-    chosen_classes = rng.choice(classes_ok, size=n_classes_take, replace=False)
+    classes_escolhidas = rng.choice(classes_ok, size=n_classes_take, replace=False).astype(np.int64, copy=False)
 
     blocos = []
     extras_por_classe = []
 
-    for c in chosen_classes:
+    for c in classes_escolhidas.tolist():
         idx_c = np.where(y == c)[0]
         rng.shuffle(idx_c)
         blocos.append(idx_c[:min_por_classe])
