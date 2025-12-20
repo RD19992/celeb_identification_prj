@@ -2,7 +2,6 @@ import joblib
 import numpy as np
 from pathlib import Path
 from itertools import product
-from sklearn.random_projection import SparseRandomProjection
 from sklearn.model_selection import StratifiedKFold
 
 # (Opcional) suporte a sparse sem quebrar se scipy não estiver instalado
@@ -23,22 +22,22 @@ CONFIG = {
     "frac_classes": 0.05,          # ex: 0.05 = usa 5% das classes aleatórias
     "seed_classes": 42,
 
+    # ✅ Mínimo de amostras por classe no filtro inicial
+    "min_amostras_por_classe": 20,
+
     # Split treino/teste (sem validação)
     "test_frac": 0.09,
     "seed_split": 42,
-    "n_min_treino_por_classe": 5,  # garante pelo menos 1 amostra por classe no treino
 
-    # Random Projection (sobre o HOG)
-    # Dica: comece com 256 ou 512 pra acelerar MUITO.
-    "rp_n_components": 1764, # 1764 No Random Projection
-    "rp_seed": 42,
+    # (mantido do seu script) garante pelo menos N amostras por classe no treino
+    "n_min_treino_por_classe": 5,
 
     # CV
     "k_folds": 3,
     "seed_cv": 42,
 
     # Grid de lambdas (Elastic Net) -> ajuste livremente
-    # Dica: grid pequeno para testar; depois amplia.
+    # OBS: com a correção de escala (reg/m), estes lambdas ficam “mais fracos” do que antes.
     "lambda_l1_grid": [0.0, 0.05, 0.1, 0.5],
     "lambda_l2_grid": [0.0, 0.05, 0.1, 0.5],
 
@@ -48,7 +47,7 @@ CONFIG = {
     "taxa_aprendizado": 0.05,   # vira alpha inicial do Armijo
     "tamanho_lote": 256,
 
-    # Progresso do GD (evita print a cada lote, que deixa lento)
+    # Progresso do GD
     "imprimir_a_cada_n_lotes": 25,
 
     # Output
@@ -110,7 +109,7 @@ def selecionar_classes_aleatorias(X, y, frac_classes: float, seed: int, min_amos
     """
     1) escolhe aleatoriamente uma % das classes
     2) filtra dataset para só essas classes
-    3) remove classes que ficaram com poucas amostras (min_amostras_por_classe)
+    3) remove classes com poucas amostras (min_amostras_por_classe)
     """
     rng = np.random.default_rng(seed)
     classes = np.unique(y)
@@ -143,7 +142,7 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
     n = len(y)
     test_n = int(np.round(test_frac * n))
 
-    # agrupa índices por classe via sorting (mais eficiente que vários np.where)
+    # agrupa índices por classe via sorting
     order = np.argsort(y)
     y_sorted = y[order]
     _, start_idx = np.unique(y_sorted, return_index=True)
@@ -196,7 +195,7 @@ def gradiente_descendente(
 ):
     """
     GD com passo escolhido por line search (backtracking) usando condição de Armijo.
-    Mantém a mesma API: taxa_aprendizado é o alpha inicial.
+    taxa_aprendizado é o alpha inicial.
     """
     rng = np.random.default_rng(seed)
 
@@ -226,7 +225,6 @@ def gradiente_descendente(
             Xb = X[lote]
             Yb = Y[lote]
 
-            # perda e gradiente no ponto atual
             perda0, grads = funcao_perda_grad(params, Xb, Yb)
 
             grad_norm_sq = 0.0
@@ -261,7 +259,6 @@ def gradiente_descendente(
                 if alpha < alpha_min or bt <= 0:
                     break
 
-            # fallback: passo mínimo
             if not aceitou:
                 alpha = max(alpha, alpha_min)
                 for nome_param in grads:
@@ -279,18 +276,24 @@ def gradiente_descendente(
     return params, historico
 
 # ============================================================
-# Classificação Linear Multiclasse: Softmax + Cross-Entropy + Elastic Net
+# Classificação Linear Multiclasse: Softmax + Cross-Entropy + Elastic Net (ESCALA CORRETA)
 # ============================================================
 
 def perda_e_gradiente_softmax_ce_elasticnet(params, X, Y, lambda_l1, lambda_l2, eps: float = 1e-12):
     """
     Softmax + Cross-Entropy (multiclasse) + Elastic Net em W.
-    Y é one-hot: shape (m, K).
+
+    ✅ Escala correta:
+    - CE é média por amostra
+    - Regularização também é dividida por m
+    - Gradientes de reg também divididos por m
     """
     W = params["W"]  # (K, d)
     b = params["b"]  # (K,)
 
     m = X.shape[0]
+    if m <= 0:
+        return 0.0, {"W": np.zeros_like(W), "b": np.zeros_like(b)}
 
     logits = X @ W.T + b  # (m, K)
 
@@ -303,17 +306,18 @@ def perda_e_gradiente_softmax_ce_elasticnet(params, X, Y, lambda_l1, lambda_l2, 
     # cross-entropy média
     ce = -np.mean(np.sum(Y * np.log(P + eps), axis=1))
 
-    # regularização
-    reg = lambda_l1 * np.sum(np.abs(W)) + 0.5 * lambda_l2 * np.sum(W * W)
+    # ✅ regularização escalada por m
+    reg = (lambda_l1 * np.sum(np.abs(W)) + 0.5 * lambda_l2 * np.sum(W * W)) / m
     loss = ce + reg
 
-    # gradiente
+    # gradiente CE
     dlogits = (P - Y) / m                 # (m, K)
     grad_W = dlogits.T @ X                # (K, d)
     grad_b = np.sum(dlogits, axis=0)      # (K,)
 
-    grad_W += lambda_l2 * W
-    grad_W += lambda_l1 * np.sign(W)
+    # ✅ gradiente da reg escalado por m
+    grad_W += (lambda_l2 * W) / m
+    grad_W += (lambda_l1 * np.sign(W)) / m
 
     return float(loss), {"W": grad_W, "b": grad_b}
 
@@ -333,7 +337,6 @@ def treinar_regressao_linear_multiclasse_elasticnet(
     b0 = np.zeros(K, dtype=np.float64)
     params0 = {"W": W0, "b": b0}
 
-    # ✅ troca aqui: MSE -> Softmax+Cross-Entropy
     def f(params, Xb, Yb):
         return perda_e_gradiente_softmax_ce_elasticnet(
             params,
@@ -366,7 +369,6 @@ def treinar_regressao_linear_multiclasse_elasticnet(
     }
 
 def prever_regressao_linear_multiclasse(modelo, X):
-    # argmax dos logits é equivalente ao argmax do softmax
     W, b, classes = modelo["W"], modelo["b"], modelo["classes"]
     logits = X.astype(np.float64, copy=False) @ W.T + b
     idx_pred = np.argmax(logits, axis=1)
@@ -427,7 +429,7 @@ def escolher_melhores_lambdas_por_cv(
     return melhor  # (mean_err, l1, l2)
 
 # ============================================================
-# PIPELINE PRINCIPAL
+# PIPELINE PRINCIPAL (SEM RANDOM PROJECTION)
 # ============================================================
 
 def main():
@@ -446,54 +448,43 @@ def main():
     print("n classes:", len(np.unique(y)))
 
     # Normalização L2 pós-HOG (por amostra)
-    print("\n[Etapa 0/5] Normalizando HOG (L2 por amostra)...")
+    print("\n[Etapa 0/4] Normalizando HOG (L2 por amostra)...")
     X = l2_normalize_rows(X)
 
     # Seleção de classes ANTES do split
-    k = CONFIG["k_folds"]
-    min_amostras_por_classe = max(k, 2)  # garante CV viável
-
-    print(f"\n[Etapa 1/5] Selecionando {CONFIG['frac_classes']*100:.1f}% das classes (seed={CONFIG['seed_classes']})...")
+    print(f"\n[Etapa 1/4] Selecionando {CONFIG['frac_classes']*100:.1f}% das classes (seed={CONFIG['seed_classes']}) "
+          f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe...")
     X, y, _ = selecionar_classes_aleatorias(
         X, y,
         frac_classes=CONFIG["frac_classes"],
         seed=CONFIG["seed_classes"],
-        min_amostras_por_classe=min_amostras_por_classe
+        min_amostras_por_classe=CONFIG["min_amostras_por_classe"]
     )
-    print("[Etapa 1/5] Após filtro:")
+    print("[Etapa 1/4] Após filtro:")
     print("  X:", X.shape, " | n classes:", len(np.unique(y)))
 
     # Split treino/teste
-    print(f"\n[Etapa 2/5] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) garantindo 1+ amostra/classe no treino...")
+    print(f"\n[Etapa 2/4] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
+          f"garantindo {CONFIG['n_min_treino_por_classe']}+ amostras/classe no treino...")
     X_train, X_test, y_train, y_test = split_garantindo_treino_por_classe(
         X, y,
         test_frac=CONFIG["test_frac"],
         seed=CONFIG["seed_split"],
         n_min_treino_por_classe=CONFIG["n_min_treino_por_classe"]
     )
-    print("[Etapa 2/5] Shapes:")
+    print("[Etapa 2/4] Shapes:")
     print("  Train:", X_train.shape, y_train.shape)
     print("  Test :", X_test.shape,  y_test.shape)
 
-    # Random Projection
-    print(f"\n[Etapa 3/5] Random Projection: n_components={CONFIG['rp_n_components']} (seed={CONFIG['rp_seed']})")
-    rp = SparseRandomProjection(n_components=CONFIG["rp_n_components"], random_state=CONFIG["rp_seed"])
-    X_train_rp = rp.fit_transform(X_train)
-    X_test_rp  = rp.transform(X_test)
-    print("[Etapa 3/5] Shapes após RP:")
-    print("  Train RP:", X_train_rp.shape)
-    print("  Test  RP:", X_test_rp.shape)
-
-    # Normalização L2 pós-RP (por amostra)
-    print("[Etapa 3/5] Normalizando pós-RP (L2 por amostra)...")
-    X_train_rp = l2_normalize_rows(X_train_rp)
-    X_test_rp  = l2_normalize_rows(X_test_rp)
+    # ✅ SEM RP: as features já são o HOG normalizado
+    X_train_feat = X_train
+    X_test_feat = X_test
 
     # classes fixas para manter o mesmo espaço de saída (K) em todos os folds
     classes_fixas = np.unique(y_train)
 
     # CV para escolher lambdas
-    print(f"\n[Etapa 4/5] K-Fold CV (k={CONFIG['k_folds']}) para escolher lambdas...")
+    print(f"\n[Etapa 3/4] K-Fold CV (k={CONFIG['k_folds']}) para escolher lambdas...")
     treino_cfg = {
         "taxa_aprendizado": CONFIG["taxa_aprendizado"],
         "epocas_cv": CONFIG["epocas_cv"],
@@ -503,7 +494,7 @@ def main():
     }
 
     best = escolher_melhores_lambdas_por_cv(
-        X_train_rp, y_train, classes_fixas,
+        X_train_feat, y_train, classes_fixas,
         CONFIG["lambda_l1_grid"], CONFIG["lambda_l2_grid"],
         k_folds=CONFIG["k_folds"],
         seed_cv=CONFIG["seed_cv"],
@@ -513,9 +504,9 @@ def main():
     print(f"\n[CV] Melhor combinação final: mean_err={best_mean_err:.4f} | lambda_l1={best_l1} | lambda_l2={best_l2}")
 
     # Treina modelo final
-    print(f"\n[Etapa 5/5] Treinando modelo final no treino inteiro (epocas={CONFIG['epocas_final']})...")
+    print(f"\n[Etapa 4/4] Treinando modelo final no treino inteiro (epocas={CONFIG['epocas_final']})...")
     modelo_final = treinar_regressao_linear_multiclasse_elasticnet(
-        X_train_rp, y_train, classes_fixas,
+        X_train_feat, y_train, classes_fixas,
         lambda_l1=best_l1,
         lambda_l2=best_l2,
         taxa_aprendizado=CONFIG["taxa_aprendizado"],
@@ -527,15 +518,20 @@ def main():
     )
 
     # Erro no treino do melhor modelo
-    y_pred_train, _ = prever_regressao_linear_multiclasse(modelo_final, X_train_rp)
+    y_pred_train, _ = prever_regressao_linear_multiclasse(modelo_final, X_train_feat)
     erro_treino = calcular_erro_classificacao(y_train.astype(np.int64), y_pred_train.astype(np.int64))
     print(f"\n[Resultado] Erro no conjunto de TREINO (melhor modelo): {erro_treino:.4f} | Acurácia: {1.0-erro_treino:.4f}")
+
+    # Diagnóstico: top classes preditas
+    vals, cnt = np.unique(y_pred_train, return_counts=True)
+    top = np.argsort(cnt)[::-1][:5]
+    print("Top predicted classes:", list(zip(vals[top], cnt[top], cnt[top] / len(y_pred_train))))
 
     # Exemplos de previsão
     if CONFIG["exemplos_de"].lower() == "treino":
         y_true_ex, y_pred_ex = y_train, y_pred_train
     else:
-        y_pred_test, _ = prever_regressao_linear_multiclasse(modelo_final, X_test_rp)
+        y_pred_test, _ = prever_regressao_linear_multiclasse(modelo_final, X_test_feat)
         y_true_ex, y_pred_ex = y_test, y_pred_test
 
     mostrar_previsoes_amostrais(
