@@ -22,29 +22,30 @@ CONFIG = {
     "frac_classes": 0.05,          # ex: 0.05 = usa 5% das classes aleatórias
     "seed_classes": 42,
 
-    # ✅ Mínimo de amostras por classe no filtro inicial
+    # ✅ mínimo de amostras por classe no filtro inicial
     "min_amostras_por_classe": 20,
 
     # Split treino/teste (sem validação)
     "test_frac": 0.09,
     "seed_split": 42,
 
-    # (mantido do seu script) garante pelo menos N amostras por classe no treino
+    # garante pelo menos N amostras por classe no treino
+    # (bom ter >= k_folds; deixei 5 como padrão)
     "n_min_treino_por_classe": 5,
 
     # CV
     "k_folds": 3,
     "seed_cv": 42,
 
-    # Grid de lambdas (Elastic Net) -> ajuste livremente
-    # OBS: com a correção de escala (reg/m), estes lambdas ficam “mais fracos” do que antes.
+    # Grid de lambdas (Elastic Net)
+    # OBS: agora reg é /m, então estes lambdas ficam “menos agressivos” do que antes.
     "lambda_l1_grid": [0.0, 0.05, 0.1, 0.5],
     "lambda_l2_grid": [0.0, 0.05, 0.1, 0.5],
 
-    # Treino por GD (use menos épocas no CV; mais no final)
+    # Treino por GD com Armijo (taxa_aprendizado = alpha inicial)
     "epocas_cv": 15,
     "epocas_final": 30,
-    "taxa_aprendizado": 0.05,   # vira alpha inicial do Armijo
+    "taxa_aprendizado": 0.05,
     "tamanho_lote": 256,
 
     # Progresso do GD
@@ -127,7 +128,6 @@ def selecionar_classes_aleatorias(X, y, frac_classes: float, seed: int, min_amos
     mask2 = np.isin(y2, classes_ok)
 
     X3, y3 = X2[mask2], y2[mask2]
-
     return X3, y3, classes_ok
 
 # ============================================================
@@ -142,7 +142,6 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
     n = len(y)
     test_n = int(np.round(test_frac * n))
 
-    # agrupa índices por classe via sorting
     order = np.argsort(y)
     y_sorted = y[order]
     _, start_idx = np.unique(y_sorted, return_index=True)
@@ -167,7 +166,6 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
 
     test_idx = rng.choice(resto_idx, size=test_n, replace=False)
 
-    # o resto vai para treino
     test_set = set(test_idx.tolist())
     resto_para_treino = np.array([i for i in resto_idx if i not in test_set], dtype=np.int64)
 
@@ -199,12 +197,10 @@ def gradiente_descendente(
     """
     rng = np.random.default_rng(seed)
 
-    # ---- Parâmetros do Armijo ----
     c = 1e-4
     rho = 0.5
     max_backtracks = 12
     alpha_min = 1e-10
-    # -----------------------------
 
     params = {}
     for k, v in params_iniciais.items():
@@ -228,14 +224,13 @@ def gradiente_descendente(
             perda0, grads = funcao_perda_grad(params, Xb, Yb)
 
             grad_norm_sq = 0.0
-            for _, g in grads.items():
+            for g in grads.values():
                 grad_norm_sq += float(np.sum(g * g))
-
             if grad_norm_sq <= 0.0:
                 continue
 
             alpha = float(taxa_aprendizado)
-            bt = max_backtracks  # reset por batch
+            bt = max_backtracks
 
             aceitou = False
             while True:
@@ -248,7 +243,6 @@ def gradiente_descendente(
 
                 perda_cand, _ = funcao_perda_grad(params_cand, Xb, Yb)
 
-                # Armijo: f(x - a g) <= f(x) - c a ||g||^2
                 if perda_cand <= perda0 - c * alpha * grad_norm_sq:
                     aceitou = True
                     params = params_cand
@@ -276,21 +270,31 @@ def gradiente_descendente(
     return params, historico
 
 # ============================================================
-# Classificação Linear Multiclasse: Softmax + Cross-Entropy + Elastic Net (ESCALA CORRETA)
+# Weighted Softmax + Cross-Entropy + Elastic Net (com escala correta)
 # ============================================================
 
-def perda_e_gradiente_softmax_ce_elasticnet(params, X, Y, lambda_l1, lambda_l2, eps: float = 1e-12):
+def perda_e_gradiente_softmax_wce_elasticnet(
+    params,
+    X,
+    Y,
+    class_weights,   # shape (K,)
+    lambda_l1,
+    lambda_l2,
+    eps: float = 1e-12
+):
     """
-    Softmax + Cross-Entropy (multiclasse) + Elastic Net em W.
+    Weighted Cross-Entropy (por classe) + Softmax + Elastic Net em W.
 
     ✅ Escala correta:
-    - CE é média por amostra
-    - Regularização também é dividida por m
-    - Gradientes de reg também divididos por m
+    - WCE é média por amostra
+    - Regularização também é /m
+    - Gradiente de reg também é /m
+
+    class_weights: pesos por classe (K,)
+      Usaremos o peso do rótulo verdadeiro: w_i = class_weights[y_i]
     """
     W = params["W"]  # (K, d)
     b = params["b"]  # (K,)
-
     m = X.shape[0]
     if m <= 0:
         return 0.0, {"W": np.zeros_like(W), "b": np.zeros_like(b)}
@@ -303,23 +307,40 @@ def perda_e_gradiente_softmax_ce_elasticnet(params, X, Y, lambda_l1, lambda_l2, 
     sumexp = np.sum(expz, axis=1, keepdims=True)
     P = expz / (sumexp + eps)
 
-    # cross-entropy média
-    ce = -np.mean(np.sum(Y * np.log(P + eps), axis=1))
+    # pesos por amostra: w_i = sum_k (Y_ik * w_k)
+    # (pois Y é one-hot)
+    w_per_sample = (Y * class_weights[None, :]).sum(axis=1)  # (m,)
 
-    # ✅ regularização escalada por m
+    # weighted cross-entropy: -(1/m) sum_i w_i * log P_{i, y_i}
+    logp_true = np.sum(Y * np.log(P + eps), axis=1)           # (m,)
+    wce = -np.mean(w_per_sample * logp_true)
+
+    # regularização /m
     reg = (lambda_l1 * np.sum(np.abs(W)) + 0.5 * lambda_l2 * np.sum(W * W)) / m
-    loss = ce + reg
+    loss = wce + reg
 
-    # gradiente CE
-    dlogits = (P - Y) / m                 # (m, K)
-    grad_W = dlogits.T @ X                # (K, d)
-    grad_b = np.sum(dlogits, axis=0)      # (K,)
+    # gradiente: dL/dlogits_i = (w_i/m) * (P_i - Y_i)
+    dlogits = (w_per_sample[:, None] * (P - Y)) / m          # (m, K)
 
-    # ✅ gradiente da reg escalado por m
+    grad_W = dlogits.T @ X
+    grad_b = np.sum(dlogits, axis=0)
+
+    # grad reg /m
     grad_W += (lambda_l2 * W) / m
     grad_W += (lambda_l1 * np.sign(W)) / m
 
     return float(loss), {"W": grad_W, "b": grad_b}
+
+def compute_class_weights_from_yidx(y_idx: np.ndarray, K: int, eps: float = 1e-12) -> np.ndarray:
+    """
+    Pesos padrão: total/(K*count_k)  (equivale a inverso da frequência, normalizado).
+    Se uma classe estiver ausente, count=0 -> usamos 1 para não explodir (e ela não aparece no batch).
+    """
+    counts = np.bincount(y_idx, minlength=K).astype(np.float64)
+    counts_safe = np.maximum(counts, 1.0)
+    total = float(np.sum(counts))
+    w = total / (K * counts_safe + eps)
+    return w.astype(np.float64)
 
 def treinar_regressao_linear_multiclasse_elasticnet(
     X_treino, y_treino, classes_fixas,
@@ -327,10 +348,13 @@ def treinar_regressao_linear_multiclasse_elasticnet(
     taxa_aprendizado, epocas, tamanho_lote,
     seed, verbose, imprimir_a_cada_n_lotes
 ):
-    y_idx, classes, mapa = codificar_rotulos_com_classes(y_treino, classes_fixas)
+    y_idx, classes, _ = codificar_rotulos_com_classes(y_treino, classes_fixas)
     K = len(classes)
     d = X_treino.shape[1]
     Y = one_hot(y_idx, K)
+
+    # ✅ pesos por classe calculados no TREINO (por fold / por treino final)
+    class_weights = compute_class_weights_from_yidx(y_idx, K)
 
     rng = np.random.default_rng(seed)
     W0 = rng.normal(0.0, 0.01, size=(K, d)).astype(np.float64)
@@ -338,10 +362,11 @@ def treinar_regressao_linear_multiclasse_elasticnet(
     params0 = {"W": W0, "b": b0}
 
     def f(params, Xb, Yb):
-        return perda_e_gradiente_softmax_ce_elasticnet(
+        return perda_e_gradiente_softmax_wce_elasticnet(
             params,
             Xb.astype(np.float64, copy=False),
             Yb,
+            class_weights=class_weights,
             lambda_l1=lambda_l1,
             lambda_l2=lambda_l2
         )
@@ -362,10 +387,10 @@ def treinar_regressao_linear_multiclasse_elasticnet(
         "W": params_finais["W"],
         "b": params_finais["b"],
         "classes": classes,
-        "mapa": mapa,
         "historico_perda": historico,
         "lambda_l1": lambda_l1,
-        "lambda_l2": lambda_l2
+        "lambda_l2": lambda_l2,
+        "class_weights": class_weights,
     }
 
 def prever_regressao_linear_multiclasse(modelo, X):
@@ -385,7 +410,6 @@ def escolher_melhores_lambdas_por_cv(
     treino_cfg
 ):
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed_cv)
-
     combos = list(product(lambda_l1_grid, lambda_l2_grid))
     melhor = None  # (mean_err, l1, l2)
 
@@ -394,8 +418,8 @@ def escolher_melhores_lambdas_por_cv(
 
     for c_idx, (l1, l2) in enumerate(combos, start=1):
         erros = []
-
         print(f"\n[CV] Combo {c_idx}/{total_combos}: lambda_l1={l1} | lambda_l2={l2}")
+
         for f_idx, (tr_idx, va_idx) in enumerate(skf.split(X_train, y_train), start=1):
             X_tr, y_tr = X_train[tr_idx], y_train[tr_idx]
             X_va, y_va = X_train[va_idx], y_train[va_idx]
@@ -416,7 +440,6 @@ def escolher_melhores_lambdas_por_cv(
             y_pred_va, _ = prever_regressao_linear_multiclasse(modelo, X_va)
             err = calcular_erro_classificacao(y_va.astype(np.int64), y_pred_va.astype(np.int64))
             erros.append(err)
-
             print(f"[CV]  Fold {f_idx}/{k_folds} - erro={err:.4f}")
 
         mean_err = float(np.mean(erros))
@@ -426,7 +449,7 @@ def escolher_melhores_lambdas_por_cv(
             melhor = (mean_err, l1, l2)
             print(f"[CV] ** Novo melhor até agora: erro={mean_err:.4f} | l1={l1} | l2={l2}")
 
-    return melhor  # (mean_err, l1, l2)
+    return melhor
 
 # ============================================================
 # PIPELINE PRINCIPAL (SEM RANDOM PROJECTION)
@@ -447,11 +470,11 @@ def main():
     print("y:", y.shape, y.dtype)
     print("n classes:", len(np.unique(y)))
 
-    # Normalização L2 pós-HOG (por amostra)
+    # Normalização L2 pós-HOG
     print("\n[Etapa 0/4] Normalizando HOG (L2 por amostra)...")
     X = l2_normalize_rows(X)
 
-    # Seleção de classes ANTES do split
+    # Seleção de classes ANTES do split (agora min 20)
     print(f"\n[Etapa 1/4] Selecionando {CONFIG['frac_classes']*100:.1f}% das classes (seed={CONFIG['seed_classes']}) "
           f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe...")
     X, y, _ = selecionar_classes_aleatorias(
@@ -476,11 +499,11 @@ def main():
     print("  Train:", X_train.shape, y_train.shape)
     print("  Test :", X_test.shape,  y_test.shape)
 
-    # ✅ SEM RP: as features já são o HOG normalizado
+    # SEM RP: features são HOG normalizado
     X_train_feat = X_train
     X_test_feat = X_test
 
-    # classes fixas para manter o mesmo espaço de saída (K) em todos os folds
+    # classes fixas para manter saída consistente nos folds
     classes_fixas = np.unique(y_train)
 
     # CV para escolher lambdas
@@ -503,7 +526,7 @@ def main():
     best_mean_err, best_l1, best_l2 = best
     print(f"\n[CV] Melhor combinação final: mean_err={best_mean_err:.4f} | lambda_l1={best_l1} | lambda_l2={best_l2}")
 
-    # Treina modelo final
+    # Treina modelo final no treino inteiro
     print(f"\n[Etapa 4/4] Treinando modelo final no treino inteiro (epocas={CONFIG['epocas_final']})...")
     modelo_final = treinar_regressao_linear_multiclasse_elasticnet(
         X_train_feat, y_train, classes_fixas,
