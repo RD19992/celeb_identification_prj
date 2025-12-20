@@ -74,7 +74,7 @@ CONFIG = {
     "eps_std": 1e-6,
 
     # grid L2 (5 valores) – simples como pedido
-    "grid_l2": [0.0, 1e-5, 1e-4, 3e-4, 1e-3],
+    "grid_l2": [0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1],
 
     # logs / debug
     "print_every_batches": 25,
