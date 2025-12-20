@@ -221,49 +221,94 @@ def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_trai
 #   - Final: pega fração por classe, restrita às classes do CV
 # ============================================================
 
-def amostrar_para_cv_por_classes(y_train: np.ndarray, frac: float, seed: int, min_por_classe: int):
+def amostrar_para_cv_por_classes(y: np.ndarray, frac_amostras: float, min_por_classe: int, seed: int):
+    """
+    Amostra um subconjunto do TREINO para rodar CV (grid-search), garantindo
+    pelo menos `min_por_classe` exemplos por classe NO SUBSET FINAL.
+
+    [FIX #2 - Classes com 4 membros no CV]
+    A versão anterior coletava min_por_classe por classe, mas depois truncava
+    aleatoriamente para bater o "alvo" de amostras. Esse truncamento podia
+    reduzir alguma classe de 5 -> 4 (por exemplo), gerando warning/erro no
+    StratifiedKFold quando k_folds=5.
+
+    Novo comportamento:
+      1) Define quantas classes cabem no alvo dado `min_por_classe`.
+      2) Coleta `min_por_classe` por classe escolhida.
+      3) Se ainda faltar para chegar perto do alvo, completa com exemplos extra
+         sem nunca reduzir nenhuma classe abaixo de `min_por_classe`.
+    """
+    y = np.asarray(y, dtype=np.int64).ravel()
     rng = np.random.default_rng(seed)
-    y_train = np.asarray(y_train)
 
-    N = int(len(y_train))
-    alvo = max(min_por_classe, int(np.round(frac * N)))
-    if alvo <= 0:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+    N = int(len(y))
+    if N == 0:
+        return np.array([], dtype=np.int64)
 
-    classes, counts = np.unique(y_train, return_counts=True)
-    classes_ok = classes[counts >= min_por_classe]
+    # alvo ~ "número de amostras" (aproximado). Garante pelo menos min_por_classe.
+    alvo = max(int(min_por_classe), int(np.round(frac_amostras * N)))
+
+    classes_all, counts_all = np.unique(y, return_counts=True)
+    classes_ok = classes_all[counts_all >= min_por_classe]
+
     if len(classes_ok) == 0:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        return np.array([], dtype=np.int64)
 
-    rng.shuffle(classes_ok)
+    # Quantas classes cabem no alvo se pegarmos min_por_classe por classe.
+    n_classes_take = max(1, alvo // int(min_por_classe))
+    n_classes_take = min(n_classes_take, len(classes_ok))
 
-    idx_por_classe = {}
-    for c in classes_ok.tolist():
-        idx = np.where(y_train == c)[0]
-        rng.shuffle(idx)
-        idx_por_classe[int(c)] = idx
+    chosen_classes = rng.choice(classes_ok, size=n_classes_take, replace=False)
 
-    amostra = []
-    classes_escolhidas = []
-    for c in classes_ok.tolist():
-        c = int(c)
-        idx = idx_por_classe[c]
-        if len(idx) < min_por_classe:
-            continue
-        amostra.append(idx[:min_por_classe])
-        classes_escolhidas.append(c)
-        if sum(len(a) for a in amostra) >= alvo:
-            break
+    blocos = []
+    extras_por_classe = []
 
-    if len(amostra) == 0:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+    for c in chosen_classes:
+        idx_c = np.where(y == c)[0]
+        rng.shuffle(idx_c)
+        blocos.append(idx_c[:min_por_classe])
+        extras_por_classe.append(idx_c[min_por_classe:])
 
-    amostra_idx = np.concatenate(amostra).astype(np.int64, copy=False)
-    if len(amostra_idx) > alvo:
-        rng.shuffle(amostra_idx)
-        amostra_idx = amostra_idx[:alvo]
+    amostra_idx = np.concatenate(blocos).astype(np.int64, copy=False)
 
-    classes_escolhidas = np.array(classes_escolhidas, dtype=np.int64)
+    # Completa (se possível) até chegar perto do alvo, sem mexer no mínimo por classe.
+    faltam = int(alvo) - int(len(amostra_idx))
+    if faltam > 0:
+        extras = []
+        ptrs = np.zeros(n_classes_take, dtype=np.int64)
+
+        while faltam > 0:
+            progresso = False
+            for j in range(n_classes_take):
+                if faltam <= 0:
+                    break
+                if ptrs[j] < len(extras_por_classe[j]):
+                    extras.append(extras_por_classe[j][ptrs[j]])
+                    ptrs[j] += 1
+                    faltam -= 1
+                    progresso = True
+            if not progresso:
+                break
+
+        if extras:
+            amostra_idx = np.concatenate([amostra_idx, np.asarray(extras, dtype=np.int64)])
+
+    # Sanity check: no subset final, toda classe deve respeitar min_por_classe
+    y_sub = y[amostra_idx]
+    _, sub_counts = np.unique(y_sub, return_counts=True)
+    if len(sub_counts) == 0 or int(np.min(sub_counts)) < int(min_por_classe):
+        raise RuntimeError(
+            f"[BUG] Subset p/ CV violou min_por_classe: min={int(np.min(sub_counts)) if len(sub_counts) else -1} "
+            f"< {int(min_por_classe)}"
+        )
+
+    rng.shuffle(amostra_idx)
+
+    print(
+        f"[CV] Amostra p/ CV: alvo~={alvo} | obtido={len(amostra_idx)} | "
+        f"classes={len(np.unique(y_sub))} | min/classe={int(np.min(sub_counts))}"
+    )
+
     return amostra_idx, classes_escolhidas
 
 
@@ -593,28 +638,55 @@ def prever(modelo: dict, X: np.ndarray):
 # ============================================================
 
 def avaliar_com_debug(nome: str, modelo: dict, X: np.ndarray, y_true_labels: np.ndarray):
-    y_true_labels = y_true_labels.astype(np.int64, copy=False)
+    # [FIX #1 - Métrica/erro incorreto]
+    # Força 1D (ravel) + checa shapes para evitar broadcasting silencioso.
+    y_true = np.asarray(y_true_labels, dtype=np.int64).ravel()
 
     # 1) via labels
     y_pred_labels, logits = prever(modelo, X)
-    y_pred_labels = y_pred_labels.astype(np.int64, copy=False)
-    acc_labels = float(np.mean(y_true_labels == y_pred_labels))
+    y_pred = np.asarray(y_pred_labels, dtype=np.int64).ravel()
+
+    if y_true.shape != y_pred.shape:
+        raise ValueError(
+            f"[{nome}] Shape mismatch em avaliação: y_true={y_true.shape} vs y_pred={y_pred.shape}. "
+            "Isso costuma indicar rótulos com shape (N,1) ou algum desalinhamento."
+        )
+
+    n = int(len(y_true))
+    if n == 0:
+        print(f"\n[{nome}] Aviso: N=0, nada para avaliar.")
+        return y_pred
+
+    n_ok = int(np.sum(y_true == y_pred))
+    acc_labels = float(n_ok / n)
     err_labels = 1.0 - acc_labels
 
     # 2) via idx interno (para garantir que mapeamento/classe não está bugado)
-    classes = modelo["classes"].astype(np.int64, copy=False)
-    y_true_idx, _, _ = codificar_rotulos_com_classes(y_true_labels, classes)
+    classes = np.asarray(modelo["classes"], dtype=np.int64).ravel()
+    y_true_idx, _, _ = codificar_rotulos_com_classes(y_true, classes)
     pred_idx = np.argmax(logits, axis=1).astype(np.int64, copy=False)
+
+    if y_true_idx.shape != pred_idx.shape:
+        raise ValueError(f"[{nome}] Shape mismatch idx-interno: y_true_idx={y_true_idx.shape} vs pred_idx={pred_idx.shape}")
+
     acc_idx = float(np.mean(y_true_idx == pred_idx))
     err_idx = 1.0 - acc_idx
 
-    print(f"\n[{nome}] Erro={err_labels:.4f} | Acurácia={acc_labels:.4f} | N={len(y_true_labels)}")
+    print(f"\n[{nome}] Erro={err_labels:.4f} | Acurácia={acc_labels:.4f} | N={n}")
     print(f"[{nome}] Debug idx-interno: Erro={err_idx:.4f} | Acurácia={acc_idx:.4f}  (deve bater com acima)")
 
     if abs(acc_labels - acc_idx) > 1e-6:
-        print(f"[{nome}] ALERTA: acc por label != acc por idx. Há bug de mapeamento/consistência!")
+        print(f"[{nome}] ALERTA: acc por label != acc por idx. Possível bug de mapeamento/consistência!")
 
-    return y_pred_labels
+    # Debug útil: se não for perfeito, mostra alguns erros reais
+    erros_idx = np.flatnonzero(y_true != y_pred)
+    if len(erros_idx) > 0:
+        k = int(min(5, len(erros_idx)))
+        amostra = erros_idx[:k]
+        exemplos = ", ".join([f"{int(y_true[i])}->{int(y_pred[i])}" for i in amostra])
+        print(f"[{nome}] Exemplos de erros ({k}/{len(erros_idx)}): {exemplos}")
+
+    return y_pred
 
 
 # ============================================================
@@ -729,8 +801,11 @@ def imprimir_matriz_confusao(cm: np.ndarray, row_labels, col_labels, titulo: str
     print("=" * 72 + "\n")
 
 def avaliar_teste_top10(y_test: np.ndarray, y_pred_test: np.ndarray, top_k: int = 10):
-    y_test = y_test.astype(np.int64, copy=False)
-    y_pred_test = y_pred_test.astype(np.int64, copy=False)
+    # [FIX #1] Força 1D + checa shapes para evitar broadcasting silencioso
+    y_test = np.asarray(y_test, dtype=np.int64).ravel()
+    y_pred_test = np.asarray(y_pred_test, dtype=np.int64).ravel()
+    if y_test.shape != y_pred_test.shape:
+        raise ValueError(f"[TESTE] Shape mismatch: y_test={y_test.shape} vs y_pred={y_pred_test.shape}")
 
     n = len(y_test)
     if n == 0:
