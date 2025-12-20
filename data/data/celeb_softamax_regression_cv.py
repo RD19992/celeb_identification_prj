@@ -22,8 +22,8 @@ CONFIG = {
     "frac_classes": 0.05,          # ex: 0.05 = usa 5% das classes aleatórias
     "seed_classes": 42,
 
-    # ✅ mínimo de amostras por classe no filtro inicial
-    "min_amostras_por_classe": 20,
+    # mínimo de amostras por classe no filtro inicial
+    "min_amostras_por_classe": 20,  # <- como você pediu
 
     # Split treino/teste (sem validação)
     "test_frac": 0.09,
@@ -38,7 +38,7 @@ CONFIG = {
     "seed_cv": 42,
 
     # Grid de lambdas (Elastic Net)
-    # OBS: agora reg é /m, então estes lambdas ficam “menos agressivos” do que antes.
+    # OBS: agora reg é /m => esses lambdas ficam “menos agressivos” do que antes.
     "lambda_l1_grid": [0.0, 0.05, 0.1, 0.5],
     "lambda_l2_grid": [0.0, 0.05, 0.1, 0.5],
 
@@ -54,6 +54,10 @@ CONFIG = {
     # Output
     "n_exemplos_previsao": 10,
     "exemplos_de": "teste",  # "teste" ou "treino"
+
+    # Diagnóstico
+    "diag_seed": 42,
+    "diag_max_amostras_prob": 5000,   # para stats de confiança sem explodir memória/tempo
 }
 
 # ============================================================
@@ -101,6 +105,17 @@ def mostrar_previsoes_amostrais(y_true: np.ndarray, y_pred: np.ndarray, n_amostr
     print("\nExemplos aleatórios (verdadeiro -> predito):")
     for t, i in enumerate(idx, start=1):
         print(f"  #{t:02d} | y_true={int(y_true[i])} -> y_pred={int(y_pred[i])}")
+
+def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_train_por_classe: int):
+    """
+    Garante que TODA classe usada no CV tem pelo menos min_train_por_classe no treino.
+    Remove do treino e do teste classes que não atingem esse mínimo no treino.
+    """
+    classes, counts = np.unique(y_train, return_counts=True)
+    classes_ok = classes[counts >= min_train_por_classe]
+    mask_tr = np.isin(y_train, classes_ok)
+    mask_te = np.isin(y_test, classes_ok)
+    return X_train[mask_tr], y_train[mask_tr], X_test[mask_te], y_test[mask_te], classes_ok
 
 # ============================================================
 # Seleção de classes ANTES do split
@@ -176,7 +191,7 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
     return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
 # ============================================================
-# Gradiente descendente com Armijo (backtracking) + progresso
+# Gradiente descendente com Armijo (backtracking) + progresso + stats
 # ============================================================
 
 def gradiente_descendente(
@@ -194,6 +209,7 @@ def gradiente_descendente(
     """
     GD com passo escolhido por line search (backtracking) usando condição de Armijo.
     taxa_aprendizado é o alpha inicial.
+    Retorna também stats úteis p/ diagnóstico (aceitação do Armijo, alpha médio etc.).
     """
     rng = np.random.default_rng(seed)
 
@@ -212,6 +228,16 @@ def gradiente_descendente(
 
     n_lotes = int(np.ceil(n / tamanho_lote))
     historico = []
+
+    stats = {
+        "updates_total": 0,
+        "armijo_aceitou": 0,
+        "armijo_fallback": 0,
+        "alpha_sum": 0.0,
+        "alpha_min": alpha_min,
+        "alpha_max_observado": 0.0,
+        "backtracks_sum": 0,
+    }
 
     for epoca in range(epocas):
         idx = rng.permutation(n)
@@ -253,7 +279,15 @@ def gradiente_descendente(
                 if alpha < alpha_min or bt <= 0:
                     break
 
-            if not aceitou:
+            stats["updates_total"] += 1
+            stats["alpha_sum"] += float(alpha)
+            stats["alpha_max_observado"] = max(stats["alpha_max_observado"], float(alpha))
+            stats["backtracks_sum"] += int(max_backtracks - bt)
+
+            if aceitou:
+                stats["armijo_aceitou"] += 1
+            else:
+                stats["armijo_fallback"] += 1
                 alpha = max(alpha, alpha_min)
                 for nome_param in grads:
                     params[nome_param] = params[nome_param] - alpha * grads[nome_param]
@@ -267,10 +301,62 @@ def gradiente_descendente(
             historico.append(float(perda_full))
             print(f"[GD+Armijo] Época {epoca+1}/{epocas} | perda={perda_full:.6f}")
 
-    return params, historico
+    return params, historico, stats
 
 # ============================================================
-# Weighted Softmax + Cross-Entropy + Elastic Net (com escala correta)
+# Softmax + Cross-Entropy + Elastic Net (COM escala correta /m)
+# ============================================================
+
+def perda_e_gradiente_softmax_ce_elasticnet(
+    params,
+    X,
+    Y,
+    lambda_l1,
+    lambda_l2,
+    eps: float = 1e-12
+):
+    """
+    Softmax + Cross-Entropy (multiclasse) + Elastic Net em W.
+    Y é one-hot: shape (m, K).
+
+    ✅ Correção: regularização e gradiente da regularização também são /m
+    (no seu código original, isso estava sem /m). :contentReference[oaicite:2]{index=2}
+    """
+    W = params["W"]  # (K, d)
+    b = params["b"]  # (K,)
+
+    m = X.shape[0]
+    if m <= 0:
+        return 0.0, {"W": np.zeros_like(W), "b": np.zeros_like(b)}
+
+    logits = X @ W.T + b  # (m, K)
+
+    # softmax estável
+    z = logits - np.max(logits, axis=1, keepdims=True)
+    expz = np.exp(z)
+    sumexp = np.sum(expz, axis=1, keepdims=True)
+    P = expz / (sumexp + eps)
+
+    # cross-entropy média
+    ce = -np.mean(np.sum(Y * np.log(P + eps), axis=1))
+
+    # ✅ regularização /m
+    reg = (lambda_l1 * np.sum(np.abs(W)) + 0.5 * lambda_l2 * np.sum(W * W)) / m
+    loss = ce + reg
+
+    # gradiente
+    dlogits = (P - Y) / m            # (m, K)
+    grad_W = dlogits.T @ X           # (K, d)
+    grad_b = np.sum(dlogits, axis=0) # (K,)
+
+    # ✅ grad reg /m
+    grad_W += (lambda_l2 * W) / m
+    grad_W += (lambda_l1 * np.sign(W)) / m
+
+    return float(loss), {"W": grad_W, "b": grad_b}
+
+# ============================================================
+# Weighted Softmax + Cross-Entropy + Elastic Net (já OK /m)
 # ============================================================
 
 def perda_e_gradiente_softmax_wce_elasticnet(
@@ -284,14 +370,7 @@ def perda_e_gradiente_softmax_wce_elasticnet(
 ):
     """
     Weighted Cross-Entropy (por classe) + Softmax + Elastic Net em W.
-
-    ✅ Escala correta:
-    - WCE é média por amostra
-    - Regularização também é /m
-    - Gradiente de reg também é /m
-
-    class_weights: pesos por classe (K,)
-      Usaremos o peso do rótulo verdadeiro: w_i = class_weights[y_i]
+    ✅ reg e grad reg com /m (mantido). :contentReference[oaicite:3]{index=3}
     """
     W = params["W"]  # (K, d)
     b = params["b"]  # (K,)
@@ -307,11 +386,10 @@ def perda_e_gradiente_softmax_wce_elasticnet(
     sumexp = np.sum(expz, axis=1, keepdims=True)
     P = expz / (sumexp + eps)
 
-    # pesos por amostra: w_i = sum_k (Y_ik * w_k)
-    # (pois Y é one-hot)
+    # pesos por amostra: w_i = sum_k (Y_ik * w_k)  (Y one-hot)
     w_per_sample = (Y * class_weights[None, :]).sum(axis=1)  # (m,)
 
-    # weighted cross-entropy: -(1/m) sum_i w_i * log P_{i, y_i}
+    # weighted cross-entropy média
     logp_true = np.sum(Y * np.log(P + eps), axis=1)           # (m,)
     wce = -np.mean(w_per_sample * logp_true)
 
@@ -319,7 +397,7 @@ def perda_e_gradiente_softmax_wce_elasticnet(
     reg = (lambda_l1 * np.sum(np.abs(W)) + 0.5 * lambda_l2 * np.sum(W * W)) / m
     loss = wce + reg
 
-    # gradiente: dL/dlogits_i = (w_i/m) * (P_i - Y_i)
+    # gradiente: (w_i/m) * (P - Y)
     dlogits = (w_per_sample[:, None] * (P - Y)) / m          # (m, K)
 
     grad_W = dlogits.T @ X
@@ -333,8 +411,7 @@ def perda_e_gradiente_softmax_wce_elasticnet(
 
 def compute_class_weights_from_yidx(y_idx: np.ndarray, K: int, eps: float = 1e-12) -> np.ndarray:
     """
-    Pesos padrão: total/(K*count_k)  (equivale a inverso da frequência, normalizado).
-    Se uma classe estiver ausente, count=0 -> usamos 1 para não explodir (e ela não aparece no batch).
+    Pesos padrão: total/(K*count_k)  (inverso da frequência, normalizado).
     """
     counts = np.bincount(y_idx, minlength=K).astype(np.float64)
     counts_safe = np.maximum(counts, 1.0)
@@ -342,19 +419,24 @@ def compute_class_weights_from_yidx(y_idx: np.ndarray, K: int, eps: float = 1e-1
     w = total / (K * counts_safe + eps)
     return w.astype(np.float64)
 
+# ============================================================
+# Treino / Predição
+# ============================================================
+
 def treinar_regressao_linear_multiclasse_elasticnet(
     X_treino, y_treino, classes_fixas,
     lambda_l1, lambda_l2,
     taxa_aprendizado, epocas, tamanho_lote,
-    seed, verbose, imprimir_a_cada_n_lotes
+    seed, verbose, imprimir_a_cada_n_lotes,
+    usar_weighted_ce: bool = True
 ):
     y_idx, classes, _ = codificar_rotulos_com_classes(y_treino, classes_fixas)
     K = len(classes)
     d = X_treino.shape[1]
     Y = one_hot(y_idx, K)
 
-    # ✅ pesos por classe calculados no TREINO (por fold / por treino final)
-    class_weights = compute_class_weights_from_yidx(y_idx, K)
+    # pesos por classe (se weighted)
+    class_weights = compute_class_weights_from_yidx(y_idx, K) if usar_weighted_ce else None
 
     rng = np.random.default_rng(seed)
     W0 = rng.normal(0.0, 0.01, size=(K, d)).astype(np.float64)
@@ -362,16 +444,22 @@ def treinar_regressao_linear_multiclasse_elasticnet(
     params0 = {"W": W0, "b": b0}
 
     def f(params, Xb, Yb):
-        return perda_e_gradiente_softmax_wce_elasticnet(
-            params,
-            Xb.astype(np.float64, copy=False),
-            Yb,
-            class_weights=class_weights,
-            lambda_l1=lambda_l1,
-            lambda_l2=lambda_l2
-        )
+        Xb = Xb.astype(np.float64, copy=False)
+        if usar_weighted_ce:
+            return perda_e_gradiente_softmax_wce_elasticnet(
+                params, Xb, Yb,
+                class_weights=class_weights,
+                lambda_l1=lambda_l1,
+                lambda_l2=lambda_l2
+            )
+        else:
+            return perda_e_gradiente_softmax_ce_elasticnet(
+                params, Xb, Yb,
+                lambda_l1=lambda_l1,
+                lambda_l2=lambda_l2
+            )
 
-    params_finais, historico = gradiente_descendente(
+    params_finais, historico, stats_gd = gradiente_descendente(
         params0, f,
         X_treino.astype(np.float64, copy=False),
         Y,
@@ -391,6 +479,8 @@ def treinar_regressao_linear_multiclasse_elasticnet(
         "lambda_l1": lambda_l1,
         "lambda_l2": lambda_l2,
         "class_weights": class_weights,
+        "usar_weighted_ce": usar_weighted_ce,
+        "gd_stats": stats_gd,
     }
 
 def prever_regressao_linear_multiclasse(modelo, X):
@@ -400,6 +490,108 @@ def prever_regressao_linear_multiclasse(modelo, X):
     return classes[idx_pred], logits
 
 # ============================================================
+# Diagnóstico
+# ============================================================
+
+def diagnostico_modelo(
+    *,
+    modelo,
+    X_train,
+    y_train,
+    y_pred_train,
+    logits_train=None,
+    titulo: str = "Diagnóstico",
+    max_amostras_prob: int = 5000,
+    seed: int = 42
+):
+    """
+    Bloco de diagnóstico para detectar:
+    - baseline 1/K e maioria
+    - colapso (poucas classes preditas)
+    - distribuição de classes e predições
+    - escala de W (normas, sparsity)
+    - confiança média (se logits fornecido; amostra limitada)
+    - stats do Armijo
+    """
+    rng = np.random.default_rng(seed)
+    classes = modelo["classes"]
+    K = len(classes)
+    n = len(y_train)
+
+    print("\n" + "=" * 72)
+    print(f"[{titulo}]")
+    print("=" * 72)
+    print(f"N treino = {n} | K (classes) = {K}")
+    print(f"Baseline aleatório 1/K = {1.0 / max(K, 1):.6f}")
+
+    # baseline maioria
+    vals, cnt = np.unique(y_train, return_counts=True)
+    maj = float(np.max(cnt) / n) if n > 0 else 0.0
+    print(f"Baseline maioria (classe mais frequente) = {maj:.6f}")
+
+    # distribuição do treino
+    print(f"Distribuição y_train: min={int(np.min(cnt))} | med={int(np.median(cnt))} | max={int(np.max(cnt))}")
+
+    # distribuição das predições
+    vals_p, cnt_p = np.unique(y_pred_train, return_counts=True)
+    cobertura = len(vals_p) / max(K, 1)
+    top = np.argsort(cnt_p)[::-1][:10]
+    print(f"Predições únicas = {len(vals_p)}/{K}  (cobertura={cobertura:.3f})")
+    print("Top-10 classes preditas (classe, count, fração):")
+    for i in top:
+        print(f"  {int(vals_p[i])} | {int(cnt_p[i])} | {cnt_p[i] / n:.4f}")
+
+    # métricas de colapso simples
+    frac_top1 = float(cnt_p[top[0]] / n) if len(top) else 0.0
+    if cobertura < 0.20:
+        print("⚠️ ALERTA: cobertura < 20% das classes (possível colapso de predição).")
+    if frac_top1 > 0.25:
+        print("⚠️ ALERTA: top-1 predição > 25% do treino (modelo pode estar colapsando).")
+
+    # stats de W
+    W = modelo["W"]
+    absW = np.abs(W)
+    w_l2 = float(np.linalg.norm(W))
+    w_l1 = float(np.sum(absW))
+    w_max = float(np.max(absW))
+    spars = float(np.mean(absW < 1e-10))
+    print(f"||W||_2 = {w_l2:.6e} | ||W||_1 = {w_l1:.6e} | max|W| = {w_max:.6e} | sparsity(|W|<1e-10)={spars:.3f}")
+
+    b = modelo["b"]
+    print(f"b: mean={float(np.mean(b)):.3e} | std={float(np.std(b)):.3e} | min={float(np.min(b)):.3e} | max={float(np.max(b)):.3e}")
+
+    # class weights
+    if modelo.get("class_weights") is not None:
+        cw = modelo["class_weights"]
+        print(f"class_weights: min={float(np.min(cw)):.4f} | med={float(np.median(cw)):.4f} | max={float(np.max(cw)):.4f}")
+
+    # confiança (amostrando para não custar caro)
+    if logits_train is not None and n > 0:
+        m = min(n, max_amostras_prob)
+        idx = rng.choice(n, size=m, replace=False)
+
+        L = logits_train[idx]
+        # softmax estável
+        z = L - np.max(L, axis=1, keepdims=True)
+        expz = np.exp(z)
+        P = expz / (np.sum(expz, axis=1, keepdims=True) + 1e-12)
+        pmax = np.max(P, axis=1)
+
+        print(f"Confiança (amostra={m}): mean(max softmax)={float(np.mean(pmax)):.4f} | med={float(np.median(pmax)):.4f} | p90={float(np.quantile(pmax, 0.90)):.4f}")
+
+    # Armijo stats
+    st = modelo.get("gd_stats", {})
+    if st:
+        upd = max(int(st.get("updates_total", 0)), 1)
+        acc = int(st.get("armijo_aceitou", 0))
+        fb = int(st.get("armijo_fallback", 0))
+        alpha_mean = float(st.get("alpha_sum", 0.0)) / upd
+        bt_mean = float(st.get("backtracks_sum", 0)) / upd
+        print(f"Armijo: aceitou={acc}/{upd} ({acc/upd:.2%}) | fallback={fb}/{upd} ({fb/upd:.2%}) | alpha_médio={alpha_mean:.3e} | backtracks_médio={bt_mean:.2f}")
+
+    print("=" * 72 + "\n")
+
+# ============================================================
 # K-Fold CV para escolher lambdas
 # ============================================================
 
@@ -407,7 +599,8 @@ def escolher_melhores_lambdas_por_cv(
     X_train, y_train, classes_fixas,
     lambda_l1_grid, lambda_l2_grid,
     k_folds, seed_cv,
-    treino_cfg
+    treino_cfg,
+    usar_weighted_ce: bool = True
 ):
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed_cv)
     combos = list(product(lambda_l1_grid, lambda_l2_grid))
@@ -434,7 +627,8 @@ def escolher_melhores_lambdas_por_cv(
                 tamanho_lote=treino_cfg["tamanho_lote"],
                 seed=treino_cfg["seed_treino"] + f_idx,
                 verbose=False,
-                imprimir_a_cada_n_lotes=treino_cfg["imprimir_a_cada_n_lotes"]
+                imprimir_a_cada_n_lotes=treino_cfg["imprimir_a_cada_n_lotes"],
+                usar_weighted_ce=usar_weighted_ce
             )
 
             y_pred_va, _ = prever_regressao_linear_multiclasse(modelo, X_va)
@@ -452,7 +646,7 @@ def escolher_melhores_lambdas_por_cv(
     return melhor
 
 # ============================================================
-# PIPELINE PRINCIPAL (SEM RANDOM PROJECTION)
+# PIPELINE PRINCIPAL (SEM Random Projection)
 # ============================================================
 
 def main():
@@ -471,43 +665,67 @@ def main():
     print("n classes:", len(np.unique(y)))
 
     # Normalização L2 pós-HOG
-    print("\n[Etapa 0/4] Normalizando HOG (L2 por amostra)...")
+    print("\n[Etapa 0/5] Normalizando HOG (L2 por amostra)...")
     X = l2_normalize_rows(X)
 
-    # Seleção de classes ANTES do split (agora min 20)
-    print(f"\n[Etapa 1/4] Selecionando {CONFIG['frac_classes']*100:.1f}% das classes (seed={CONFIG['seed_classes']}) "
-          f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe...")
+    # Seleção de classes ANTES do split
+    print(
+        f"\n[Etapa 1/5] Selecionando {CONFIG['frac_classes']*100:.1f}% das classes (seed={CONFIG['seed_classes']}) "
+        f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe..."
+    )
     X, y, _ = selecionar_classes_aleatorias(
         X, y,
         frac_classes=CONFIG["frac_classes"],
         seed=CONFIG["seed_classes"],
         min_amostras_por_classe=CONFIG["min_amostras_por_classe"]
     )
-    print("[Etapa 1/4] Após filtro:")
+    print("[Etapa 1/5] Após filtro:")
     print("  X:", X.shape, " | n classes:", len(np.unique(y)))
 
     # Split treino/teste
-    print(f"\n[Etapa 2/4] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
-          f"garantindo {CONFIG['n_min_treino_por_classe']}+ amostras/classe no treino...")
+    print(
+        f"\n[Etapa 2/5] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
+        f"garantindo {CONFIG['n_min_treino_por_classe']}+ amostras/classe no treino..."
+    )
     X_train, X_test, y_train, y_test = split_garantindo_treino_por_classe(
         X, y,
         test_frac=CONFIG["test_frac"],
         seed=CONFIG["seed_split"],
         n_min_treino_por_classe=CONFIG["n_min_treino_por_classe"]
     )
-    print("[Etapa 2/4] Shapes:")
-    print("  Train:", X_train.shape, y_train.shape)
-    print("  Test :", X_test.shape,  y_test.shape)
+
+    # Garante CV viável (cada classe precisa >= k_folds no treino)
+    print(f"\n[Etapa 3/5] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (para CV estratificado)...")
+    X_train, y_train, X_test, y_test, classes_ok = filtrar_classes_min_train_para_cv(
+        X_train, y_train, X_test, y_test, min_train_por_classe=CONFIG["k_folds"]
+    )
+
+    print("[Etapa 3/5] Shapes após filtro p/ CV:")
+    print("  Train:", X_train.shape, y_train.shape, "| n classes:", len(np.unique(y_train)))
+    print("  Test :", X_test.shape, y_test.shape,  "| n classes:", len(np.unique(y_test)))
 
     # SEM RP: features são HOG normalizado
     X_train_feat = X_train
     X_test_feat = X_test
 
-    # classes fixas para manter saída consistente nos folds
     classes_fixas = np.unique(y_train)
 
+    # ===== Diagnóstico pré-CV (sanidade do dataset) =====
+    # baseline: só para enxergar K e desbalanceamento antes de gastar tempo treinando
+    y_pred_dummy = np.full_like(y_train, fill_value=classes_fixas[0])
+    diagnostico_modelo(
+        modelo={"W": np.zeros((len(classes_fixas), X_train_feat.shape[1])), "b": np.zeros(len(classes_fixas)), "classes": classes_fixas, "gd_stats": {}},
+        X_train=X_train_feat,
+        y_train=y_train,
+        y_pred_train=y_pred_dummy,
+        logits_train=None,
+        titulo="Diagnóstico PRÉ-CV (apenas dataset/baselines)",
+        max_amostras_prob=CONFIG["diag_max_amostras_prob"],
+        seed=CONFIG["diag_seed"]
+    )
+
     # CV para escolher lambdas
-    print(f"\n[Etapa 3/4] K-Fold CV (k={CONFIG['k_folds']}) para escolher lambdas...")
+    print(f"\n[Etapa 4/5] K-Fold CV (k={CONFIG['k_folds']}) para escolher lambdas...")
     treino_cfg = {
         "taxa_aprendizado": CONFIG["taxa_aprendizado"],
         "epocas_cv": CONFIG["epocas_cv"],
@@ -516,18 +734,21 @@ def main():
         "imprimir_a_cada_n_lotes": CONFIG["imprimir_a_cada_n_lotes"]
     }
 
+    usar_weighted_ce = True  # você está usando WCE
+
     best = escolher_melhores_lambdas_por_cv(
         X_train_feat, y_train, classes_fixas,
         CONFIG["lambda_l1_grid"], CONFIG["lambda_l2_grid"],
         k_folds=CONFIG["k_folds"],
         seed_cv=CONFIG["seed_cv"],
-        treino_cfg=treino_cfg
+        treino_cfg=treino_cfg,
+        usar_weighted_ce=usar_weighted_ce
     )
     best_mean_err, best_l1, best_l2 = best
     print(f"\n[CV] Melhor combinação final: mean_err={best_mean_err:.4f} | lambda_l1={best_l1} | lambda_l2={best_l2}")
 
     # Treina modelo final no treino inteiro
-    print(f"\n[Etapa 4/4] Treinando modelo final no treino inteiro (epocas={CONFIG['epocas_final']})...")
+    print(f"\n[Etapa 5/5] Treinando modelo final no treino inteiro (epocas={CONFIG['epocas_final']})...")
     modelo_final = treinar_regressao_linear_multiclasse_elasticnet(
         X_train_feat, y_train, classes_fixas,
         lambda_l1=best_l1,
@@ -537,18 +758,26 @@ def main():
         tamanho_lote=CONFIG["tamanho_lote"],
         seed=999,
         verbose=True,
-        imprimir_a_cada_n_lotes=CONFIG["imprimir_a_cada_n_lotes"]
+        imprimir_a_cada_n_lotes=CONFIG["imprimir_a_cada_n_lotes"],
+        usar_weighted_ce=usar_weighted_ce
     )
 
     # Erro no treino do melhor modelo
-    y_pred_train, _ = prever_regressao_linear_multiclasse(modelo_final, X_train_feat)
+    y_pred_train, logits_train = prever_regressao_linear_multiclasse(modelo_final, X_train_feat)
     erro_treino = calcular_erro_classificacao(y_train.astype(np.int64), y_pred_train.astype(np.int64))
     print(f"\n[Resultado] Erro no conjunto de TREINO (melhor modelo): {erro_treino:.4f} | Acurácia: {1.0-erro_treino:.4f}")
 
-    # Diagnóstico: top classes preditas
-    vals, cnt = np.unique(y_pred_train, return_counts=True)
-    top = np.argsort(cnt)[::-1][:5]
-    print("Top predicted classes:", list(zip(vals[top], cnt[top], cnt[top] / len(y_pred_train))))
+    # ===== Diagnóstico pós-treino =====
+    diagnostico_modelo(
+        modelo=modelo_final,
+        X_train=X_train_feat,
+        y_train=y_train.astype(np.int64),
+        y_pred_train=y_pred_train.astype(np.int64),
+        logits_train=logits_train,
+        titulo="Diagnóstico PÓS-TREINO (modelo final)",
+        max_amostras_prob=CONFIG["diag_max_amostras_prob"],
+        seed=CONFIG["diag_seed"]
+    )
 
     # Exemplos de previsão
     if CONFIG["exemplos_de"].lower() == "treino":
