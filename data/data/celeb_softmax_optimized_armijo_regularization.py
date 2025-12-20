@@ -22,7 +22,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # prototipagem / seleção de classes
-    "frac_classes": 1.00,           # fração das CLASSES ELEGÍVEIS (ex: 0.005 = 0.5%)
+    "frac_classes": 1.00,            # fração das CLASSES ELEGÍVEIS (ex: 0.005 = 0.5%)
     "seed_classes": 42,
     "min_amostras_por_classe": 25,   # mínimo no dataset inteiro para classe ser elegível
 
@@ -33,12 +33,14 @@ CONFIG = {
 
     # CV
     "k_folds": 5,                    # ajuste aqui (ex: 3, 5)
-    "cv_frac": 0.05,                 # [ALTERAÇÃO pedida anteriormente] 5% do treino p/ CV
-    "final_frac": 0.20,              # [ALTERAÇÃO pedida anteriormente] 20% do treino p/ treino final
+    "cv_frac": 0.01,                 # 1% do treino p/ CV
+    "final_frac": 1.00,              # 100% do treino p/ treino final
 
     # treinamento
-    "epochs": 80,
-    "alpha_init": 2.0,               # [ALTERAÇÃO] alpha inicial maior (Armijo vai reduzir se precisar)
+    # Separar nº de épocas entre CV e treino final para controlar custo
+    "epochs_cv": 30,                 # <= use menor no CV para não explodir custo
+    "epochs_final": 100,              # <= use maior (ou igual) no treino final
+    "alpha_init": 2.0,               # alpha inicial maior (Armijo vai reduzir se precisar)
     "armijo_beta": 0.5,              # fator de backtracking
     "armijo_sigma": 1e-4,            # parâmetro de suficiência (Armijo)
     "eps_std": 1e-6,
@@ -48,10 +50,10 @@ CONFIG = {
     "grid_l1": [0.0, 1e-4, 3e-4, 1e-3],
     "grid_l2": [0.0, 1e-4, 3e-4, 1e-3],
 
-    # [NOVO] limitar custo do CV: testar só N combos (l1,l2)
-    "max_combos_cv": 8,            # limita nº de combinações (l1,l2) no CV
-    "seed_combos_cv": 42,          # seed p/ seleção das combinações
-    "combo_strategy_cv": "cover",  # "cover" cobre extremos/miolo; "random" amostra aleatório
+    # limitar custo do CV: testar só N combos (l1,l2)
+    "max_combos_cv": 8,              # limita nº de combinações (l1,l2) no CV
+    "seed_combos_cv": 42,            # seed p/ seleção das combinações
+    "combo_strategy_cv": "cover",    # "cover" cobre extremos/miolo; "random" amostra aleatório
 
     # outputs
     "n_exemplos_previsao": 10,
@@ -200,9 +202,6 @@ def armijo_search_alpha_epoch(
     m = X.shape[0]
     loss0, _ = softmax_loss(W, b, X, y, classes, l1=l1, l2=l2)
 
-    # direção descent (dW/db já são grad CE+L2, L1 é via prox)
-    # Usamos um majorante simples para condição: dot(grad, step) aproximado.
-    # stepW = W_new - W ; stepb = b_new - b
     alpha = float(alpha_init)
     max_tries = 50
 
@@ -214,7 +213,6 @@ def armijo_search_alpha_epoch(
 
         stepW = W_try - W
         stepb = b_try - b
-        # produto interno aproximado com grad CE+L2 (antes do prox)
         descent = float(np.sum(dW * stepW) + np.sum(db * stepb))
 
         if loss_try <= loss0 + sigma * descent:
@@ -222,7 +220,6 @@ def armijo_search_alpha_epoch(
 
         alpha *= beta
 
-    # se falhar, retorna último
     W_try = prox_l1(W - alpha * dW, thresh=(alpha * l1) / m)
     b_try = b - alpha * db
     loss_try, _ = softmax_loss(W_try, b_try, X, y, classes, l1=l1, l2=l2)
@@ -242,14 +239,10 @@ def treinar_softmax_armijo(
     seed: int,
 ):
     rng = np.random.default_rng(seed)
-    m, d = X_train.shape
-    k = classes_fixas.shape[0]
 
-    # init
-    W = (0.01 * rng.standard_normal((d, k))).astype(np.float32)
-    b = np.zeros((k,), dtype=np.float32)
+    W = (0.01 * rng.standard_normal((X_train.shape[1], classes_fixas.shape[0]))).astype(np.float32)
+    b = np.zeros((classes_fixas.shape[0],), dtype=np.float32)
 
-    # histórico de alphas (para diagnóstico)
     alphas = []
 
     for ep in range(1, epochs + 1):
@@ -263,7 +256,6 @@ def treinar_softmax_armijo(
             alpha_init=alpha_init, beta=beta, sigma=sigma
         )
         alphas.append(alpha)
-
         W, b = W_new, b_new
 
         if ep % 10 == 0 or ep == 1 or ep == epochs:
@@ -306,7 +298,7 @@ def matriz_confusao_top_k(y_t, y_p, top_k=10):
     classes, counts = np.unique(y_t, return_counts=True)
     order = np.argsort(-counts)
     top = classes[order[:top_k]]
-    labels = top  # ordem fixa (top mais comuns)
+    labels = top
     cm = confusion_matrix(y_t, y_p, labels=labels)
 
     print(f"\n[Matriz de Confusão] Top-{top_k} classes mais comuns no TESTE")
@@ -319,13 +311,6 @@ def matriz_confusao_top_k(y_t, y_p, top_k=10):
 # ============================================================
 
 def selecionar_combos_l1_l2(grid_l1, grid_l2, max_combos: int = 8, strategy: str = "cover", seed: int = 42):
-    """
-    Seleciona até `max_combos` pares (l1,l2) para o grid-search do CV.
-
-    Motivo: reduzir custo mantendo diversidade de regularização.
-    - strategy="cover": cobre extremos e pontos intermediários (determinístico dado o grid).
-    - strategy="random": amostra aleatoriamente (reprodutível via seed).
-    """
     g1 = sorted({float(v) for v in grid_l1})
     g2 = sorted({float(v) for v in grid_l2})
 
@@ -349,7 +334,6 @@ def selecionar_combos_l1_l2(grid_l1, grid_l2, max_combos: int = 8, strategy: str
     if strategy == "cover":
         i0, im, i1 = 0, len(g1) // 2, len(g1) - 1
         j0, jm, j1 = 0, len(g2) // 2, len(g2) - 1
-
         base = [
             (g1[i0], g2[j0]), (g1[i0], g2[jm]), (g1[i0], g2[j1]),
             (g1[im], g2[j0]), (g1[im], g2[jm]), (g1[im], g2[j1]),
@@ -358,7 +342,6 @@ def selecionar_combos_l1_l2(grid_l1, grid_l2, max_combos: int = 8, strategy: str
         for p in base:
             _add(p)
 
-    # completar com aleatório, se faltou
     remaining = [p for p in full if p not in chosen_set]
     rng.shuffle(remaining)
     for p in remaining:
@@ -385,14 +368,6 @@ def escolher_melhores_lambdas_por_cv(
     combo_strategy: str = "cover",
     seed_combos: int | None = None,
 ):
-    """
-    Grid-search (reduzido) de (l1,l2) via StratifiedKFold no TREINO de CV.
-
-    Importante:
-    - Mantém Armijo (busca de alpha) dentro do treino do fold.
-    - Mantém elastic-net (L1 + L2) no espaço de busca.
-    - Limita o nº de combos para reduzir custo (default=8).
-    """
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed)
 
     if seed_combos is None:
@@ -430,7 +405,7 @@ def escolher_melhores_lambdas_por_cv(
             modelo = treinar_softmax_armijo(
                 X_tr, y_tr, classes_fixas=classes_fixas,
                 l1=float(l1), l2=float(l2),
-                epochs=epochs, alpha_init=alpha_init, beta=beta, sigma=sigma,
+                epochs=int(epochs), alpha_init=alpha_init, beta=beta, sigma=sigma,
                 seed=seed + fold,
             )
             y_pred_va, _ = predict_labels(X_va, modelo["W"], modelo["b"], modelo["classes"])
@@ -524,12 +499,6 @@ def main():
           f"com {CONFIG['k_folds']} por classe...")
 
     def amostrar_para_cv_por_classes(y_full: np.ndarray, frac: float, seed: int, min_por_classe: int):
-        """
-        Amostra estratificada mantendo um mínimo por classe.
-        Estratégia:
-          - primeiro garante min_por_classe por classe (amostra fixa)
-          - depois completa até atingir frac do total, ainda estratificando (se possível)
-        """
         rng = np.random.default_rng(seed)
         classes = np.unique(y_full)
 
@@ -537,7 +506,6 @@ def main():
         for c in classes:
             idx_c = np.flatnonzero(y_full == c)
             if len(idx_c) < min_por_classe:
-                # não deveria acontecer se pré-filtro foi feito corretamente
                 continue
             pick = rng.choice(idx_c, size=min_por_classe, replace=False)
             idx_keep.append(pick)
@@ -552,7 +520,6 @@ def main():
         if target == len(idx_keep):
             return np.unique(idx_keep), classes
 
-        # completa com amostragem estratificada do restante
         remaining = np.setdiff1d(np.arange(len(y_full), dtype=np.int64), idx_keep, assume_unique=False)
         y_rem = y_full[remaining]
 
@@ -560,12 +527,10 @@ def main():
         if add <= 0:
             return np.unique(idx_keep), classes
 
-        # se sobrar pouca amostra, pega aleatório
         if len(remaining) <= add:
             idx_final = np.unique(np.concatenate([idx_keep, remaining]))
             return idx_final.astype(np.int64), classes
 
-        # tenta estratificar via shuffle-split no restante
         try:
             sss = StratifiedShuffleSplit(n_splits=1, train_size=add, random_state=seed)
             idx_add_local, _ = next(sss.split(np.zeros_like(y_rem), y_rem))
@@ -576,7 +541,7 @@ def main():
         idx_final = np.unique(np.concatenate([idx_keep, idx_add]).astype(np.int64))
         return idx_final, classes
 
-    idx_cv, classes_cv = amostrar_para_cv_por_classes(
+    idx_cv, _ = amostrar_para_cv_por_classes(
         y_train, frac=CONFIG["cv_frac"], seed=CONFIG["seed_split"], min_por_classe=CONFIG["k_folds"]
     )
     if idx_cv.size == 0:
@@ -589,15 +554,16 @@ def main():
     print(f"[Etapa 5/7] min count por classe no CV sample = {int(cts.min())} (deve ser >= {CONFIG['k_folds']})")
 
     # 6) escolher lambdas por CV (grid reduzido)
-    print("\n[Etapa 6/7] Rodando grid-search por CV (com Armijo + L1/L2)...")
+    epochs_cv = int(CONFIG.get("epochs_cv", CONFIG.get("epochs", 50)))
+    print(f"\n[Etapa 6/7] Rodando grid-search por CV (com Armijo + L1/L2) | epochs_cv={epochs_cv}...")
     (best_l1, best_l2), best_score, best_alpha_med = escolher_melhores_lambdas_por_cv(
         X_train_feat=X_cv,
         y_train_labels=y_cv,
-        classes_fixas=np.unique(y_cv).astype(np.int64),  # classes presentes no CV sample
+        classes_fixas=np.unique(y_cv).astype(np.int64),
         k_folds=CONFIG["k_folds"],
         grid_l1=CONFIG["grid_l1"],
         grid_l2=CONFIG["grid_l2"],
-        epochs=CONFIG["epochs"],
+        epochs=epochs_cv,
         alpha_init=CONFIG["alpha_init"],
         beta=CONFIG["armijo_beta"],
         sigma=CONFIG["armijo_sigma"],
@@ -609,7 +575,8 @@ def main():
     print(f"\n[CV] Melhor: l1={best_l1} | l2={best_l2} | mean_acc={best_score:.4f} | alpha_mediana~{best_alpha_med:.3e}")
 
     # 7) treino final em amostra maior (final_frac) e avaliação no teste
-    print(f"\n[Etapa 7/7] Treino final em {100*CONFIG['final_frac']:.1f}% do treino...")
+    epochs_final = int(CONFIG.get("epochs_final", CONFIG.get("epochs", 80)))
+    print(f"\n[Etapa 7/7] Treino final em {100*CONFIG['final_frac']:.1f}% do treino | epochs_final={epochs_final}...")
     idx_final = amostrar_estratificado(y_train, frac=CONFIG["final_frac"], seed=CONFIG["seed_split"])
     X_final = X_train_feat[idx_final]
     y_final = y_train[idx_final]
@@ -622,7 +589,7 @@ def main():
         y_train=y_final,
         classes_fixas=classes_final,
         l1=float(best_l1), l2=float(best_l2),
-        epochs=CONFIG["epochs"],
+        epochs=epochs_final,
         alpha_init=best_alpha_med if best_alpha_med is not None else CONFIG["alpha_init"],
         beta=CONFIG["armijo_beta"], sigma=CONFIG["armijo_sigma"],
         seed=CONFIG["seed_split"] + 999,
@@ -635,7 +602,6 @@ def main():
     report_accuracy("TREINO(final sample)", y_final, y_pred_train)
     report_accuracy("TESTE", y_test, y_pred_test)
 
-    # exemplos
     mostrar_exemplos_previsao(y_test, y_pred_test, P_test, n=CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
     matriz_confusao_top_k(y_test, y_pred_test, top_k=CONFIG["top_k_confusao"])
 
