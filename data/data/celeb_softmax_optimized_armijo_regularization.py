@@ -35,7 +35,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # seleção de classes (prototipagem)
-    "frac_classes": 1.00,
+    "frac_classes": 0.10,
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
 
@@ -76,8 +76,8 @@ CONFIG = {
 
     # elastic net grid
     "grid_l1": [0.0, 1e-4, 3e-4, 1e-3],
-    "grid_l2": [0.0, 1e-4, 3e-4, 1e-3],
-    "max_combos_cv": 8,
+    "grid_l2": [0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1],
+    "max_combos_cv": 16,
     "seed_combos_cv": 42,
     "combo_strategy_cv": "cover",  # cover|random
 
@@ -495,7 +495,7 @@ def matriz_confusao_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
 
 
 # ============================================================
-# CV: combos L1/L2 limitados (8 combos)
+# CV: combos L1/L2 limitados (16 combos)
 # ============================================================
 
 def montar_combos_l1_l2(grid_l1, grid_l2, max_combos: int, strategy: str, seed: int):

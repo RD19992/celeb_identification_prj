@@ -39,7 +39,7 @@ CONFIG = {
 
     # CV
     "k_folds": 5,
-    "cv_frac": 0.01,
+    "cv_frac": 0.05,
     "cv_min_por_classe": None,   # se None -> usa k_folds
     "cv_max_classes": 600,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
 
@@ -49,7 +49,7 @@ CONFIG = {
 
     # MLP
     "hidden_units": 8,
-    "act_hidden": "softmax",   # "softmax" | "tanh" | "relu"
+    "act_hidden": "tanh",   # "softmax" | "tanh" | "relu"
     "act_output": "softmax",   # por enquanto só softmax
     "w_init_scale": 0.01,
 
