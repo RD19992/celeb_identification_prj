@@ -39,9 +39,9 @@ CONFIG = {
 
     # CV
     "k_folds": 5,
-    "cv_frac": 0.05,
+    "cv_frac": 0.20,
     "cv_min_por_classe": None,   # se None -> usa k_folds
-    "cv_max_classes": 600,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
+    "cv_max_classes": None,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
 
     # treino final
     "final_frac": 1.00,
@@ -54,8 +54,8 @@ CONFIG = {
     "w_init_scale": 0.01,
 
     # treinamento (conservador p/ debugar primeiro)
-    "epochs_cv": 5,
-    "epochs_final": 30,
+    "epochs_cv": 10,
+    "epochs_final": 80,
 
     # minibatch
     "batch_size_cv": 512,
