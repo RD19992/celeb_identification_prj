@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-CELEBA HOG -> MLP (1 hidden layer) "from scratch" (L2 + Armijo)
+CELEBA HOG -> MLP (1 hidden layer) (L2 + Armijo)
 
 Mantém a mesma pipeline/estrutura do seu script anterior:
   - seleção de classes / split estratificado / padronização
@@ -9,12 +9,6 @@ Mantém a mesma pipeline/estrutura do seu script anterior:
   - Armijo 1x por ÉPOCA em "probe batch" (somente treino/CV)
   - logs e reporting de acurácia + exemplos + confusão top-k
 
-Mudança principal:
-  - Troca Softmax Regression por MLP 1 camada oculta (H=8 por padrão)
-  - Ativação da camada oculta: por default "softmax" (como você pediu),
-    mas dá para testar "tanh" ou "relu" mudando CONFIG["act_hidden"].
-  - Saída: softmax + cross-entropy multiclasse (obrigatório para classificação).
-  - Regularização: SOMENTE L2 (testa 5 valores em CV).
 """
 
 from __future__ import annotations
@@ -34,7 +28,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # seleção de classes (prototipagem)
-    "frac_classes": 1.00,
+    "frac_classes": 0.05,
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
 
