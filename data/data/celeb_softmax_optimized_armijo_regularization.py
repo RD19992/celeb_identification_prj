@@ -1,10 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-CELEBA HOG -> Softmax Regression "from scratch" (com Armijo)
-- CV em amostra estratificada do treino (cv_frac)
-- Treino final em amostra maior do treino (final_frac)
-- Evita warning do StratifiedKFold (classe com 4 membros quando k=5)
+CELEBA HOG -> Softmax Regression "from scratch" (Elastic Net + Armijo)
+
+Refatoração focada em VELOCIDADE:
+  1) Removi construção de one-hot por loop Python (era gargalo). Agora usa índices de classe (y_idx).
+  2) Treino em mini-batches (SGD) para reduzir pico de memória e evitar softmax gigante (m x K) de uma vez.
+  3) Armijo por ÉPOCA em um "probe batch" pequeno (ainda 100% dentro do TREINO/CV), evitando
+     recalcular perda em batch gigante dezenas de vezes.
+  4) Mantive a normalização por m (tamanho do treino) na loss/grad e no proximal L1.
+
+Observação: Com 2036 classes e d=8100, treinar em 100% das classes com muitas épocas pode ser caro.
+Use frac_classes, cv_frac, final_frac, epochs_cv/epochs_final e batch_size_* para prototipar.
 """
+
+from __future__ import annotations
 
 import joblib
 import numpy as np
@@ -12,17 +21,16 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split, StratifiedKFold, StratifiedShuffleSplit
 from sklearn.metrics import confusion_matrix
 
-
 # ============================================================
 # CONFIG
 # ============================================================
 
 CONFIG = {
-    # caminho do dataset HOG (joblib com {"X":..., "y":...} ou tuple (X,y))
+    # caminho do dataset HOG (joblib com {"X":. "y":.} ou tuple (X,y))
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
-    # prototipagem / seleção de classes
-    "frac_classes": 1.00,            # fração das CLASSES ELEGÍVEIS (ex: 0.005 = 0.5%)
+    # seleção de classes
+    "frac_classes": 0.10,            # fração das CLASSES ELEGÍVEIS (ex: 0.005 = 0.5%)
     "seed_classes": 42,
     "min_amostras_por_classe": 25,   # mínimo no dataset inteiro para classe ser elegível
 
@@ -32,325 +40,461 @@ CONFIG = {
     "min_train_por_classe": 5,       # mínimo no TREINO (após split) p/ manter classe
 
     # CV
-    "k_folds": 5,                    # ajuste aqui (ex: 3, 5)
-    "cv_frac": 0.01,                 # 1% do treino p/ CV
-    "final_frac": 1.00,              # 100% do treino p/ treino final
+    "k_folds": 5,
+    "cv_frac": 0.01,                 # fração do treino p/ CV
+    "cv_min_por_classe": None,       # se None, usa k_folds
+    "final_frac": 1.00,              # fração do treino p/ treino final
+    "final_min_por_classe": 1,       # garante ao menos 1 por classe (evita sumir classe quando final_frac<1)
 
-    # treinamento
-    # Separar nº de épocas entre CV e treino final para controlar custo
-    "epochs_cv": 30,                 # <= use menor no CV para não explodir custo
-    "epochs_final": 100,              # <= use maior (ou igual) no treino final
-    "alpha_init": 2.0,               # alpha inicial maior (Armijo vai reduzir se precisar)
-    "armijo_beta": 0.5,              # fator de backtracking
-    "armijo_sigma": 1e-4,            # parâmetro de suficiência (Armijo)
+    # treinamento: separar custo CV vs final
+    "epochs_cv": 30,
+    "epochs_final": 100,
+
+    # minibatch
+    "batch_size_cv": 1024,
+    "batch_size_final": 2048,
+
+    # Armijo (por época, em probe batch)
+    "armijo_alpha0": 2.0,            # alpha inicial grande
+    "armijo_growth": 1.25,           # tenta crescer entre épocas (warm-start)
+    "armijo_beta": 0.5,              # backtracking
+    "armijo_c1": 1e-4,               # condição de suficiência
+    "armijo_max_backtracks": 12,     # bem menor que 50 -> mais rápido
+    "armijo_alpha_min": 1e-6,
+    "armijo_probe_batch": 2048,      # tamanho do probe batch p/ Armijo (<= batch_size_final costuma ser bom)
+
+    # padronização
     "eps_std": 1e-6,
 
     # grid de regularização (Elastic Net no W, sem regularizar bias)
-    # loss = CE + (l2/(2m))*||W||^2 + (l1/m)*||W||_1
+    # objective total (m = n_train_total):
+    #   loss = CE + (l2/(2m))*||W||^2 + (l1/m)*||W||_1
     "grid_l1": [0.0, 1e-4, 3e-4, 1e-3],
     "grid_l2": [0.0, 1e-4, 3e-4, 1e-3],
 
     # limitar custo do CV: testar só N combos (l1,l2)
-    "max_combos_cv": 8,              # limita nº de combinações (l1,l2) no CV
-    "seed_combos_cv": 42,            # seed p/ seleção das combinações
-    "combo_strategy_cv": "cover",    # "cover" cobre extremos/miolo; "random" amostra aleatório
+    "max_combos_cv": 8,
+    "seed_combos_cv": 42,
+    "combo_strategy_cv": "cover",    # "cover" tenta cobrir extremos/miolo
 
-    # outputs
-    "n_exemplos_previsao": 10,
+    # avaliação / debug
+    "n_exemplos_previsao": 12,
     "top_k_confusao": 10,
+    "print_every_batches": 25,       # log durante treino (por época)
+    "loss_subsample_max": 2000,      # estimar loss por época em subamostra (mais rápido)
 }
 
-
 # ============================================================
-# Utils: carregamento / checks
+# Utilidades de IO / dataset
 # ============================================================
 
-def carregar_joblib_dataset(path_joblib: str):
-    obj = joblib.load(path_joblib)
-    if isinstance(obj, dict) and ("X" in obj) and ("y" in obj):
+def carregar_dataset(path: str):
+    obj = joblib.load(path)
+    if isinstance(obj, dict) and "X" in obj and "y" in obj:
         X, y = obj["X"], obj["y"]
-    elif isinstance(obj, (list, tuple)) and len(obj) == 2:
+    elif isinstance(obj, (tuple, list)) and len(obj) == 2:
         X, y = obj
     else:
-        raise ValueError("Formato inesperado do joblib. Esperado dict{'X','y'} ou tuple(X,y).")
-    return X, y
+        raise ValueError("Formato do joblib não reconhecido. Esperado dict {'X','y'} ou tuple (X,y).")
+    return np.asarray(X), np.asarray(y)
 
-
-def diagnostico_hog_dim(d: int):
-    print(f"\n[Diagnóstico HOG] Dimensão de features (d) = {d}")
-    if d == 8100:
-        print("[Diagnóstico HOG] d=8100 sugere HOG 128x128 (o9, cell8, block2).")
-    elif d == 2025:
-        print("[Diagnóstico HOG] d=2025 sugere HOG 64x64 (o9, cell8, block2).")
-    else:
-        print("[Diagnóstico HOG] d não reconhecido automaticamente (ok).")
-
-
-# ============================================================
-# Split / amostragens
-# ============================================================
-
-def selecionar_classes_eligiveis(y: np.ndarray, min_amostras: int):
+def selecionar_classes_elegiveis(y: np.ndarray, min_amostras: int):
     classes, counts = np.unique(y, return_counts=True)
-    mask = counts >= min_amostras
-    return classes[mask]
+    mask = counts >= int(min_amostras)
+    return classes[mask].astype(np.int64, copy=False)
 
-
-def escolher_classes(y: np.ndarray, frac_classes: float, seed: int, min_amostras: int):
-    classes_eligiveis = selecionar_classes_eligiveis(y, min_amostras=min_amostras)
-    rng = np.random.default_rng(seed)
-    n = len(classes_eligiveis)
-    k = max(1, int(np.ceil(frac_classes * n)))
-    chosen = rng.choice(classes_eligiveis, size=k, replace=False)
-    return np.sort(chosen), classes_eligiveis
-
-
-def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_escolhidas: np.ndarray):
-    mask = np.isin(y, classes_escolhidas)
+def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.ndarray):
+    mask = np.isin(y, classes_permitidas)
     return X[mask], y[mask]
 
-
-def filtrar_min_train_por_classe(X_train: np.ndarray, y_train: np.ndarray, min_train: int):
-    classes, counts = np.unique(y_train, return_counts=True)
-    keep = classes[counts >= min_train]
-    mask = np.isin(y_train, keep)
-    return X_train[mask], y_train[mask], keep
-
-
-def amostrar_estratificado(y: np.ndarray, frac: float, seed: int):
-    if frac >= 1.0:
-        return np.arange(len(y), dtype=np.int64)
-    if frac <= 0.0:
-        return np.array([], dtype=np.int64)
-
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=None, train_size=frac, random_state=seed)
-    idx, _ = next(sss.split(np.zeros_like(y), y))
-    return idx.astype(np.int64)
-
+def amostrar_classes(classes: np.ndarray, frac: float, seed: int):
+    frac = float(frac)
+    if frac >= 0.999999:
+        return np.array(classes, copy=True)
+    rng = np.random.default_rng(int(seed))
+    n = len(classes)
+    k = max(1, int(round(frac * n)))
+    idx = rng.choice(n, size=k, replace=False)
+    return np.sort(classes[idx]).astype(np.int64, copy=False)
 
 # ============================================================
-# Softmax: forward / loss / grad (elastic net)
+# Padronização (z-score) - float32
+# ============================================================
+
+def fit_standardizer(X: np.ndarray, eps: float = 1e-6):
+    Xf = X.astype(np.float32, copy=False)
+    mean = Xf.mean(axis=0, dtype=np.float64).astype(np.float32)
+    var = ((Xf - mean).astype(np.float32, copy=False) ** 2).mean(axis=0, dtype=np.float64).astype(np.float32)
+    std = np.sqrt(var + np.float32(eps)).astype(np.float32)
+    return mean, std
+
+def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
+    Xf = X.astype(np.float32, copy=False)
+    return ((Xf - mean) / std).astype(np.float32, copy=False)
+
+# ============================================================
+# Amostragem estratificada com garantia de mínimo por classe
+# ============================================================
+
+def amostrar_com_min_por_classe(
+    y: np.ndarray,
+    frac: float,
+    seed: int,
+    min_por_classe: int,
+):
+    """
+    Retorna índices para uma amostra estratificada que GARANTE >= min_por_classe em cada classe.
+    Se frac for pequeno demais, a função prioriza o mínimo por classe e pode exceder frac.
+    """
+    rng = np.random.default_rng(int(seed))
+    y = np.asarray(y)
+    n = y.shape[0]
+
+    classes, counts = np.unique(y, return_counts=True)
+    ok = counts >= int(min_por_classe)
+    classes_ok = classes[ok]
+    if classes_ok.size == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    idx_keep = []
+    for c in classes_ok:
+        idx_c = np.where(y == c)[0]
+        pick = rng.choice(idx_c, size=int(min_por_classe), replace=False)
+        idx_keep.append(pick)
+    idx_keep = np.concatenate(idx_keep).astype(np.int64, copy=False)
+
+    target = int(round(float(frac) * n))
+    if target <= idx_keep.size:
+        return np.sort(idx_keep), np.sort(classes_ok).astype(np.int64, copy=False)
+
+    restantes = np.setdiff1d(np.arange(n, dtype=np.int64), idx_keep, assume_unique=False)
+    if restantes.size == 0:
+        return np.sort(idx_keep), np.sort(classes_ok).astype(np.int64, copy=False)
+
+    y_rest = y[restantes]
+    add = min(target - idx_keep.size, restantes.size)
+
+    sss = StratifiedShuffleSplit(n_splits=1, train_size=add, random_state=int(seed))
+    (idx_add_rel, _) = next(sss.split(np.zeros(restantes.size), y_rest))
+    idx_add = restantes[idx_add_rel]
+
+    idx_final = np.concatenate([idx_keep, idx_add]).astype(np.int64, copy=False)
+    return np.sort(idx_final), np.sort(classes_ok).astype(np.int64, copy=False)
+
+# ============================================================
+# Softmax / encode de rótulos (y_idx)
 # ============================================================
 
 def stable_softmax(Z: np.ndarray):
-    Zm = Z - np.max(Z, axis=1, keepdims=True)
-    expZ = np.exp(Zm)
-    return expZ / np.sum(expZ, axis=1, keepdims=True)
+    Z = Z.astype(np.float32, copy=False)
+    Zm = Z - Z.max(axis=1, keepdims=True)
+    np.exp(Zm, out=Zm)
+    Zm /= Zm.sum(axis=1, keepdims=True)
+    return Zm
 
-
-def one_hot(y: np.ndarray, classes: np.ndarray):
-    # classes fixas -> colunas fixas
-    class_to_col = {c: i for i, c in enumerate(classes.tolist())}
-    m = y.shape[0]
-    k = classes.shape[0]
-    Y = np.zeros((m, k), dtype=np.float32)
-    for i in range(m):
-        Y[i, class_to_col[int(y[i])]] = 1.0
-    return Y
-
-
-def softmax_loss(W: np.ndarray, b: np.ndarray, X: np.ndarray, y: np.ndarray, classes: np.ndarray, l1: float, l2: float):
-    m = X.shape[0]
-    Z = X @ W + b
-    P = stable_softmax(Z)
-    Y = one_hot(y, classes)
-    eps = 1e-12
-    ce = -np.sum(Y * np.log(P + eps)) / m
-
-    # L2: (l2/(2m))*||W||^2
-    # L1: (l1/m)*||W||_1
-    reg_l2 = (l2 / (2.0 * m)) * float(np.sum(W * W))
-    reg_l1 = (l1 / m) * float(np.sum(np.abs(W)))
-    return ce + reg_l2 + reg_l1, P
-
-
-def softmax_grad(W: np.ndarray, b: np.ndarray, X: np.ndarray, y: np.ndarray, classes: np.ndarray, l2: float):
-    # grad do CE + L2 (L1 tratado via proximal)
-    m = X.shape[0]
-    Z = X @ W + b
-    P = stable_softmax(Z)
-    Y = one_hot(y, classes)
-    dZ = (P - Y) / m
-    dW = X.T @ dZ + (l2 / m) * W
-    db = np.sum(dZ, axis=0)
-    return dW.astype(np.float32), db.astype(np.float32), P
-
-
-def prox_l1(W: np.ndarray, thresh: float):
-    # soft-thresholding
-    return np.sign(W) * np.maximum(0.0, np.abs(W) - thresh)
-
+def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
+    """
+    classes deve estar ordenado e conter todos os rótulos de y.
+    Retorna y_idx em [0..K-1].
+    """
+    classes = np.asarray(classes, dtype=np.int64)
+    y = np.asarray(y, dtype=np.int64)
+    pos = np.searchsorted(classes, y)
+    if np.any(pos < 0) or np.any(pos >= classes.size) or np.any(classes[pos] != y):
+        raise ValueError("y contém rótulos fora de classes.")
+    return pos.astype(np.int64, copy=False)
 
 # ============================================================
-# Armijo line-search (com proximal L1)
+# Objective + grad (data + L2) e proximal L1
 # ============================================================
 
-def armijo_search_alpha_epoch(
-    W, b,
-    X, y, classes,
-    dW, db,
-    l1, l2,
-    alpha_init=1.0, beta=0.5, sigma=1e-4,
+def data_loss_ce(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray):
+    """
+    Cross-entropy média no batch (sem regularização).
+    """
+    Z = X @ W + b
+    P = stable_softmax(Z)
+    eps = np.float32(1e-12)
+    ll = -np.log(P[np.arange(P.shape[0]), y_idx] + eps)
+    return float(ll.mean())
+
+def reg_loss_elasticnet(W: np.ndarray, l1: float, l2: float, m_total: int):
+    m = float(max(int(m_total), 1))
+    l1 = float(l1); l2 = float(l2)
+    reg = 0.0
+    if l2 != 0.0:
+        reg += (l2 / (2.0 * m)) * float(np.sum(W * W))
+    if l1 != 0.0:
+        reg += (l1 / m) * float(np.sum(np.abs(W)))
+    return float(reg)
+
+def objective_total(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray, l1: float, l2: float, m_total: int):
+    return data_loss_ce(W, b, X, y_idx) + reg_loss_elasticnet(W, l1, l2, m_total)
+
+def batch_grad_ce_l2(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray, l2: float, m_total: int):
+    """
+    Gradiente do termo suave: CE(batch média) + (l2/(2*m_total))*||W||^2
+    OBS: L1 é tratado via proximal.
+    """
+    B = int(X.shape[0])
+    Z = X @ W + b
+    P = stable_softmax(Z)
+    P[np.arange(B), y_idx] -= 1.0
+    P /= np.float32(max(B, 1))  # normalização por batch (SGD)
+    dW = X.T @ P
+    if float(l2) != 0.0:
+        dW += (np.float32(l2) / np.float32(max(m_total, 1))) * W  # normalização por m_total
+    db = P.sum(axis=0)
+    return dW.astype(np.float32, copy=False), db.astype(np.float32, copy=False)
+
+def proximal_l1(W: np.ndarray, thresh: float):
+    thresh = np.float32(thresh)
+    return np.sign(W) * np.maximum(np.float32(0.0), np.abs(W) - thresh)
+
+# ============================================================
+# Armijo por ÉPOCA (em probe batch) + Treino SGD
+# ============================================================
+
+def armijo_alpha_epoch(
+    W: np.ndarray, b: np.ndarray,
+    X_probe: np.ndarray, y_probe_idx: np.ndarray,
+    dW_probe: np.ndarray, db_probe: np.ndarray,
+    l1: float, l2: float,
+    m_total: int,
+    alpha_start: float,
+    alpha0: float,
+    beta: float,
+    c1: float,
+    max_backtracks: int,
+    alpha_min: float,
 ):
     """
-    Busca alpha por backtracking (Armijo).
-    Atualização:
-      W_new = prox_{alpha*l1/m}(W - alpha*dW)
-      b_new = b - alpha*db
-    Condição Armijo baseada na perda com L1+L2.
+    Retorna alpha aprovado (>=alpha_min), e quantos backtracks.
+    Condição:
+      F(W - a*g) <= F(W) - c1 * a * ||g||^2
+    F inclui CE no probe + regularização (com normalização por m_total).
+    L1 entra via proximal no teste de passo.
     """
-    m = X.shape[0]
-    loss0, _ = softmax_loss(W, b, X, y, classes, l1=l1, l2=l2)
+    alpha = float(min(alpha_start, alpha0))
+    bt = 0
 
-    alpha = float(alpha_init)
-    max_tries = 50
+    F_old = objective_total(W, b, X_probe, y_probe_idx, l1=l1, l2=l2, m_total=m_total)
+    grad_norm_sq = float(np.sum(dW_probe * dW_probe) + np.sum(db_probe * db_probe))
+    if grad_norm_sq <= 0.0:
+        return float(max(alpha, alpha_min)), bt, F_old, F_old
 
-    for _ in range(max_tries):
-        W_try = prox_l1(W - alpha * dW, thresh=(alpha * l1) / m)
-        b_try = b - alpha * db
+    while True:
+        W_try = proximal_l1(W - np.float32(alpha) * dW_probe,
+                           thresh=(alpha * float(l1)) / float(max(m_total, 1)))
+        b_try = b - np.float32(alpha) * db_probe
 
-        loss_try, _ = softmax_loss(W_try, b_try, X, y, classes, l1=l1, l2=l2)
+        F_new = objective_total(W_try, b_try, X_probe, y_probe_idx, l1=l1, l2=l2, m_total=m_total)
 
-        stepW = W_try - W
-        stepb = b_try - b
-        descent = float(np.sum(dW * stepW) + np.sum(db * stepb))
+        if (F_new <= F_old - float(c1) * alpha * grad_norm_sq) or (alpha <= float(alpha_min)) or (bt >= int(max_backtracks)):
+            return float(max(alpha, alpha_min)), bt, F_old, F_new
 
-        if loss_try <= loss0 + sigma * descent:
-            return alpha, W_try, b_try, loss_try
+        alpha *= float(beta)
+        bt += 1
 
-        alpha *= beta
-
-    W_try = prox_l1(W - alpha * dW, thresh=(alpha * l1) / m)
-    b_try = b - alpha * db
-    loss_try, _ = softmax_loss(W_try, b_try, X, y, classes, l1=l1, l2=l2)
-    return alpha, W_try, b_try, loss_try
-
-
-def treinar_softmax_armijo(
+def treinar_softmax_elasticnet_sgd(
     X_train: np.ndarray,
     y_train: np.ndarray,
-    classes_fixas: np.ndarray,
+    classes_modelo: np.ndarray,
     l1: float,
     l2: float,
     epochs: int,
-    alpha_init: float,
-    beta: float,
-    sigma: float,
+    batch_size: int,
     seed: int,
+    use_armijo: bool = True,
 ):
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(int(seed))
+    X_train = np.ascontiguousarray(X_train.astype(np.float32, copy=False))
+    y_train = y_train.astype(np.int64, copy=False)
+    classes_modelo = np.sort(np.unique(classes_modelo)).astype(np.int64, copy=False)
 
-    W = (0.01 * rng.standard_normal((X_train.shape[1], classes_fixas.shape[0]))).astype(np.float32)
-    b = np.zeros((classes_fixas.shape[0],), dtype=np.float32)
+    y_idx = codificar_rotulos(y_train, classes_modelo)
+    m_total = int(X_train.shape[0])
+    d = int(X_train.shape[1])
+    K = int(classes_modelo.shape[0])
 
+    W = (0.01 * rng.standard_normal((d, K))).astype(np.float32)
+    b = np.zeros((K,), dtype=np.float32)
+
+    alpha_prev = float(CONFIG["armijo_alpha0"])
+    hist = []
     alphas = []
+    backtracks = []
 
-    for ep in range(1, epochs + 1):
-        dW, db, _ = softmax_grad(W, b, X_train, y_train, classes_fixas, l2=l2)
+    batch_size = int(batch_size)
+    if batch_size <= 0 or batch_size > m_total:
+        batch_size = m_total
 
-        alpha, W_new, b_new, loss_new = armijo_search_alpha_epoch(
-            W=W, b=b,
-            X=X_train, y=y_train, classes=classes_fixas,
-            dW=dW, db=db,
-            l1=l1, l2=l2,
-            alpha_init=alpha_init, beta=beta, sigma=sigma
-        )
-        alphas.append(alpha)
-        W, b = W_new, b_new
+    probe_batch = int(CONFIG["armijo_probe_batch"])
+    if probe_batch <= 0:
+        probe_batch = min(2048, m_total)
 
-        if ep % 10 == 0 or ep == 1 or ep == epochs:
-            print(f"  [Treino] ep={ep:03d}/{epochs} loss={loss_new:.6f} alpha={alpha:.3e}")
+    for ep in range(int(epochs)):
+        if use_armijo:
+            pb = min(probe_batch, m_total)
+            probe_idx = rng.choice(m_total, size=pb, replace=False)
+            Xp = X_train[probe_idx]
+            yp = y_idx[probe_idx]
 
-    return {"W": W, "b": b, "classes": classes_fixas, "alphas": np.array(alphas, dtype=np.float32)}
+            dW_p, db_p = batch_grad_ce_l2(W, b, Xp, yp, l2=float(l2), m_total=m_total)
 
+            alpha_start = min(float(CONFIG["armijo_alpha0"]), alpha_prev * float(CONFIG["armijo_growth"]))
+            alpha_ep, bt, F_old, F_new = armijo_alpha_epoch(
+                W=W, b=b,
+                X_probe=Xp, y_probe_idx=yp,
+                dW_probe=dW_p, db_probe=db_p,
+                l1=float(l1), l2=float(l2),
+                m_total=m_total,
+                alpha_start=alpha_start,
+                alpha0=float(CONFIG["armijo_alpha0"]),
+                beta=float(CONFIG["armijo_beta"]),
+                c1=float(CONFIG["armijo_c1"]),
+                max_backtracks=int(CONFIG["armijo_max_backtracks"]),
+                alpha_min=float(CONFIG["armijo_alpha_min"]),
+            )
+            alpha_prev = float(alpha_ep)
+            alphas.append(float(alpha_ep))
+            backtracks.append(int(bt))
+            print(f"[Armijo] Época {ep+1}/{epochs} | alpha={alpha_ep:.3e} | backtracks={bt} | Fprobe {F_old:.4f}->{F_new:.4f}")
+        else:
+            alpha_ep = float(CONFIG["armijo_alpha0"])
+            alphas.append(float(alpha_ep))
+            backtracks.append(0)
+
+        a32 = np.float32(alpha_ep)
+        shrink = a32 * (np.float32(l1) / np.float32(max(m_total, 1)))
+
+        perm = rng.permutation(m_total)
+        n_batches = int(np.ceil(m_total / batch_size))
+
+        for bi, start in enumerate(range(0, m_total, batch_size), start=1):
+            batch = perm[start:start + batch_size]
+            Xb = X_train[batch]
+            yb = y_idx[batch]
+
+            dW, db = batch_grad_ce_l2(W, b, Xb, yb, l2=float(l2), m_total=m_total)
+            W -= a32 * dW
+            b -= a32 * db
+            if float(l1) != 0.0:
+                W = proximal_l1(W, thresh=float(shrink))
+
+            if (bi % int(CONFIG["print_every_batches"]) == 0) or (bi == n_batches):
+                loss_b = data_loss_ce(W, b, Xb, yb) + reg_loss_elasticnet(W, l1, l2, m_total)
+                print(f"[Treino] Época {ep+1}/{epochs} | batch {bi}/{n_batches} | loss~={loss_b:.4f}", end="\r")
+
+        print(" " * 120, end="\r")
+
+        sub_n = min(int(CONFIG["loss_subsample_max"]), m_total)
+        sub = rng.choice(m_total, size=sub_n, replace=False)
+        loss_ep = objective_total(W, b, X_train[sub], y_idx[sub], l1=l1, l2=l2, m_total=m_total)
+        hist.append(float(loss_ep))
+        print(f"[SGD] Época {ep+1}/{epochs} | alpha={alpha_ep:.3e} | loss_sub~={loss_ep:.6f}")
+
+    stats = {
+        "alpha_epoch": alphas,
+        "alpha_mean": float(np.mean(alphas)) if len(alphas) else None,
+        "alpha_median": float(np.median(alphas)) if len(alphas) else None,
+        "alpha_min": float(np.min(alphas)) if len(alphas) else None,
+        "alpha_max": float(np.max(alphas)) if len(alphas) else None,
+        "armijo_backtracks_mean": float(np.mean(backtracks)) if len(backtracks) else None,
+        "armijo_backtracks_max": int(np.max(backtracks)) if len(backtracks) else None,
+        "loss_hist_sub": hist,
+    }
+
+    return {"W": W, "b": b, "classes": classes_modelo, "stats": stats}
+
+# ============================================================
+# Predição / métricas
+# ============================================================
 
 def predict_labels(X: np.ndarray, W: np.ndarray, b: np.ndarray, classes: np.ndarray):
-    P = stable_softmax(X @ W + b)
-    idx = np.argmax(P, axis=1)
+    X = np.ascontiguousarray(X.astype(np.float32, copy=False))
+    Z = X @ W + b
+    P = stable_softmax(Z)
+    idx = np.argmax(P, axis=1).astype(np.int64, copy=False)
     y_pred = classes[idx]
-    return y_pred.astype(np.int64), P
-
-
-# ============================================================
-# Métricas / prints
-# ============================================================
+    return y_pred, P
 
 def report_accuracy(nome: str, y_true: np.ndarray, y_pred: np.ndarray):
-    acc = float(np.mean(y_true == y_pred))
-    print(f"[{nome}] acc={acc:.4f} ({int(np.sum(y_true == y_pred))}/{len(y_true)})")
+    y_true = y_true.astype(np.int64, copy=False)
+    y_pred = y_pred.astype(np.int64, copy=False)
+    acc = float(np.mean(y_true == y_pred)) if y_true.size else 0.0
+    print(f"[ACC] {nome}: {acc:.4f} (n={y_true.size})")
     return acc
 
+def mostrar_exemplos_previsao(y_true: np.ndarray, y_pred: np.ndarray, P: np.ndarray, n: int, seed: int):
+    rng = np.random.default_rng(int(seed))
+    n = int(n)
+    if n <= 0:
+        return
+    m = y_true.shape[0]
+    if m == 0:
+        return
+    idx = rng.choice(m, size=min(n, m), replace=False)
+    print("\n[Exemplos] (verdadeiro -> predito | prob_pred)")
+    for i in idx:
+        prob = float(np.max(P[i]))
+        print(f"  {int(y_true[i])} -> {int(y_pred[i])} | p={prob:.3f}")
 
-def mostrar_exemplos_previsao(y_true, y_pred, P, n=10, seed=123):
-    rng = np.random.default_rng(seed)
-    n = min(n, len(y_true))
-    idxs = rng.choice(len(y_true), size=n, replace=False)
-    print("\n[Exemplos de previsão] (y_true -> y_pred | top3 prob)")
-    for i in idxs:
-        probs = P[i]
-        top3 = np.argsort(-probs)[:3]
-        top3_str = ", ".join([f"{int(top)}:{probs[top]:.3f}" for top in top3])
-        ok = "OK" if y_true[i] == y_pred[i] else "ERR"
-        print(f"  {ok}  {int(y_true[i])} -> {int(y_pred[i])} | {top3_str}")
-
-
-def matriz_confusao_top_k(y_t, y_p, top_k=10):
-    classes, counts = np.unique(y_t, return_counts=True)
+def matriz_confusao_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
+    top_k = int(top_k)
+    if top_k <= 0:
+        return
+    classes, counts = np.unique(y_true, return_counts=True)
     order = np.argsort(-counts)
     top = classes[order[:top_k]]
-    labels = top
-    cm = confusion_matrix(y_t, y_p, labels=labels)
-
-    print(f"\n[Matriz de Confusão] Top-{top_k} classes mais comuns no TESTE")
-    print("Labels (classe):", labels.tolist())
+    mask = np.isin(y_true, top)
+    cm = confusion_matrix(y_true[mask], y_pred[mask], labels=top)
+    print(f"\n[Matriz de Confusão] Top-{top_k} classes (mais frequentes no TESTE filtrado):")
+    print("labels:", top.tolist())
     print(cm)
 
-
 # ============================================================
-# CV: escolher lambdas (grid) via StratifiedKFold
+# CV: escolher melhor (l1,l2) em até 8 combos
 # ============================================================
 
-def selecionar_combos_l1_l2(grid_l1, grid_l2, max_combos: int = 8, strategy: str = "cover", seed: int = 42):
-    g1 = sorted({float(v) for v in grid_l1})
-    g2 = sorted({float(v) for v in grid_l2})
+def montar_combos_l1_l2(grid_l1, grid_l2, max_combos: int, strategy: str, seed: int):
+    grid_l1 = [float(x) for x in grid_l1]
+    grid_l2 = [float(x) for x in grid_l2]
+    all_combos = [(l1, l2) for l1 in grid_l1 for l2 in grid_l2]
+    if max_combos is None or int(max_combos) <= 0 or len(all_combos) <= int(max_combos):
+        return all_combos
 
-    if len(g1) == 0 or len(g2) == 0:
-        return [(0.0, 0.0)]
+    max_combos = int(max_combos)
+    rng = np.random.default_rng(int(seed))
+    strategy = str(strategy).lower().strip()
 
-    full = [(a, b) for a in g1 for b in g2]
-    if max_combos is None or max_combos <= 0 or len(full) <= max_combos:
-        return full
+    if strategy == "random":
+        idx = rng.choice(len(all_combos), size=max_combos, replace=False)
+        return [all_combos[i] for i in idx]
 
-    rng = np.random.default_rng(seed)
+    # "cover": tenta pegar extremos e miolo, e completa aleatório
+    combos = set()
+    combos.add((min(grid_l1), min(grid_l2)))
+    combos.add((min(grid_l1), max(grid_l2)))
+    combos.add((max(grid_l1), min(grid_l2)))
+    combos.add((max(grid_l1), max(grid_l2)))
+    combos.add((np.median(grid_l1), np.median(grid_l2)))
+    combos.add((np.median(grid_l1), min(grid_l2)))
+    combos.add((min(grid_l1), np.median(grid_l2)))
+    combos.add((np.median(grid_l1), max(grid_l2)))
 
-    chosen = []
-    chosen_set = set()
+    combos = [(float(a), float(b)) for (a, b) in combos]
+    valid = set(all_combos)
+    combos = [c for c in combos if c in valid]
 
-    def _add(pair):
-        if pair not in chosen_set:
-            chosen.append(pair)
-            chosen_set.add(pair)
+    if len(combos) >= max_combos:
+        return combos[:max_combos]
 
-    if strategy == "cover":
-        i0, im, i1 = 0, len(g1) // 2, len(g1) - 1
-        j0, jm, j1 = 0, len(g2) // 2, len(g2) - 1
-        base = [
-            (g1[i0], g2[j0]), (g1[i0], g2[jm]), (g1[i0], g2[j1]),
-            (g1[im], g2[j0]), (g1[im], g2[jm]), (g1[im], g2[j1]),
-            (g1[i1], g2[j0]), (g1[i1], g2[j1]),
-        ]
-        for p in base:
-            _add(p)
-
-    remaining = [p for p in full if p not in chosen_set]
-    rng.shuffle(remaining)
-    for p in remaining:
-        if len(chosen) >= max_combos:
-            break
-        _add(p)
-
-    return chosen[:max_combos]
-
+    rest = [c for c in all_combos if c not in set(combos)]
+    need = max_combos - len(combos)
+    idx = rng.choice(len(rest), size=need, replace=False)
+    combos.extend([rest[i] for i in idx])
+    return combos
 
 def escolher_melhores_lambdas_por_cv(
     X_train_feat: np.ndarray,
@@ -360,250 +504,190 @@ def escolher_melhores_lambdas_por_cv(
     grid_l1,
     grid_l2,
     epochs: int,
-    alpha_init: float,
-    beta: float,
-    sigma: float,
+    batch_size: int,
     seed: int,
-    max_combos: int = 8,
-    combo_strategy: str = "cover",
-    seed_combos: int | None = None,
+    max_combos: int,
+    combo_strategy: str,
+    seed_combos: int,
 ):
-    skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed)
+    skf = StratifiedKFold(n_splits=int(k_folds), shuffle=True, random_state=int(seed))
 
-    if seed_combos is None:
-        seed_combos = seed
-
-    combos = selecionar_combos_l1_l2(
-        grid_l1=grid_l1,
-        grid_l2=grid_l2,
-        max_combos=int(max_combos),
-        strategy=str(combo_strategy),
-        seed=int(seed_combos),
-    )
-
-    g1 = sorted({float(v) for v in grid_l1})
-    g2 = sorted({float(v) for v in grid_l2})
-    total_full = len(g1) * len(g2)
-    print(f"[CV] Grid completo: {len(g1)}x{len(g2)}={total_full} | avaliando {len(combos)} combos")
-    print("[CV] Combos (l1,l2):", combos)
+    combos = montar_combos_l1_l2(grid_l1, grid_l2, max_combos=max_combos, strategy=combo_strategy, seed=seed_combos)
+    print(f"[CV] combos (l1,l2) testados (max={max_combos}): {combos}")
 
     best = None
-    best_score = -1.0
-    best_alpha_med = None
-
     for (l1, l2) in combos:
         accs = []
-        alphas_medianas = []
+        alpha_meds = []
+        for fold, (tr, va) in enumerate(skf.split(X_train_feat, y_train_labels), start=1):
+            Xtr = X_train_feat[tr]
+            ytr = y_train_labels[tr]
+            Xva = X_train_feat[va]
+            yva = y_train_labels[va]
 
-        print(f"\n[CV] Testando l1={l1} | l2={l2} ...")
-        fold = 0
-        for tr_idx, va_idx in skf.split(X_train_feat, y_train_labels):
-            fold += 1
-            X_tr, y_tr = X_train_feat[tr_idx], y_train_labels[tr_idx]
-            X_va, y_va = X_train_feat[va_idx], y_train_labels[va_idx]
-
-            modelo = treinar_softmax_armijo(
-                X_tr, y_tr, classes_fixas=classes_fixas,
-                l1=float(l1), l2=float(l2),
-                epochs=int(epochs), alpha_init=alpha_init, beta=beta, sigma=sigma,
-                seed=seed + fold,
+            modelo = treinar_softmax_elasticnet_sgd(
+                X_train=Xtr,
+                y_train=ytr,
+                classes_modelo=classes_fixas,
+                l1=float(l1),
+                l2=float(l2),
+                epochs=int(epochs),
+                batch_size=int(batch_size),
+                seed=int(seed) + 1000 * fold + 7,
+                use_armijo=True,
             )
-            y_pred_va, _ = predict_labels(X_va, modelo["W"], modelo["b"], modelo["classes"])
-            acc = float(np.mean(y_pred_va == y_va))
+            yhat, _ = predict_labels(Xva, modelo["W"], modelo["b"], modelo["classes"])
+            acc = report_accuracy(f"CV fold {fold} (l1={l1}, l2={l2})", yva, yhat)
             accs.append(acc)
 
-            if modelo["alphas"].size > 0:
-                alphas_medianas.append(float(np.median(modelo["alphas"])))
+            st = modelo["stats"]
+            if st.get("alpha_median") is not None:
+                alpha_meds.append(float(st["alpha_median"]))
 
-            print(f"  [CV fold {fold}/{k_folds}] acc={acc:.4f}")
+        mean_acc = float(np.mean(accs)) if len(accs) else -1.0
+        alpha_med = float(np.median(alpha_meds)) if len(alpha_meds) else None
+        print(f"[CV] (l1={l1}, l2={l2}) mean_acc={mean_acc:.4f} | alpha_med~{alpha_med}")
 
-        mean_acc = float(np.mean(accs))
-        med_alpha = float(np.median(alphas_medianas)) if len(alphas_medianas) > 0 else float(alpha_init)
-        print(f"[CV] l1={l1} l2={l2} -> mean_acc={mean_acc:.4f} | alpha_mediana~{med_alpha:.3e}")
+        if (best is None) or (mean_acc > best[1]):
+            best = ((l1, l2), mean_acc, alpha_med)
 
-        if mean_acc > best_score:
-            best_score = mean_acc
-            best = (float(l1), float(l2))
-            best_alpha_med = med_alpha
-
-    return best, best_score, best_alpha_med
-
+    return best  # ((l1,l2), mean_acc, alpha_mediana)
 
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
-    print(f"Dataset path: {CONFIG['dataset_path']}")
-    print(f"Exists? {Path(CONFIG['dataset_path']).exists()}")
-
-    X, y = carregar_joblib_dataset(CONFIG["dataset_path"])
+    path = CONFIG["dataset_path"]
+    print("Dataset path:", path)
+    print("Exists?", Path(path).exists())
+    X, y = carregar_dataset(path)
 
     print("\n[Info] Dataset original")
     print("X:", X.shape, X.dtype)
     print("y:", y.shape, y.dtype)
     print("n classes:", len(np.unique(y)))
 
-    diagnostico_hog_dim(X.shape[1])
+    # Etapa 1: classes elegíveis e amostragem de classes
+    classes_elig = selecionar_classes_elegiveis(y, CONFIG["min_amostras_por_classe"])
+    print(f"\n[Etapa 1/7] Classes elegíveis (>= {CONFIG['min_amostras_por_classe']}): {len(classes_elig)}")
+    classes_sel = amostrar_classes(classes_elig, CONFIG["frac_classes"], CONFIG["seed_classes"])
+    print(f"[Etapa 1/7] Após seleção de classes: {len(classes_sel)} classes (frac={CONFIG['frac_classes']*100:.3f}%)")
 
-    # 1) selecionar classes elegíveis e amostrar
-    print(f"\n[Etapa 1/7] Selecionando {100*CONFIG['frac_classes']:.3f}% das classes ELEGÍVEIS "
-          f"(seed={CONFIG['seed_classes']}) com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe...")
+    X, y = filtrar_por_classes(X, y, classes_sel)
+    print(f"[Etapa 1/7] X={X.shape} | n classes={len(np.unique(y))}")
 
-    classes_sel, classes_elig = escolher_classes(
-        y, frac_classes=CONFIG["frac_classes"], seed=CONFIG["seed_classes"],
-        min_amostras=CONFIG["min_amostras_por_classe"]
+    # Etapa 2: split treino/teste estratificado
+    print(f"\n[Etapa 2/7] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) ...")
+    X_train_all, X_test_all, y_train_all, y_test_all = train_test_split(
+        X, y,
+        test_size=float(CONFIG["test_frac"]),
+        random_state=int(CONFIG["seed_split"]),
+        stratify=y,
     )
-    print(f"[Seleção] Classes elegíveis (>= {CONFIG['min_amostras_por_classe']}): {len(classes_elig)} de {len(np.unique(y))}")
+    print(f"[Etapa 2/7] Train(all): X={X_train_all.shape} | classes={len(np.unique(y_train_all))}")
+    print(f"[Etapa 2/7] Test (all): X={X_test_all.shape} | classes={len(np.unique(y_test_all))}")
 
-    Xf, yf = filtrar_por_classes(X, y, classes_sel)
-    print(f"[Etapa 1/7] Após filtro:")
-    print(f"  X: {Xf.shape} | n classes: {len(np.unique(yf))} | classes escolhidas: {len(classes_sel)}")
+    # Etapa 3: garantir mínimo por classe no TREINO e alinhar TESTE
+    min_train = int(max(CONFIG["min_train_por_classe"], CONFIG["k_folds"]))
+    print(f"\n[Etapa 3/7] Filtrando classes com >= {min_train} no TREINO ...")
+    cls_tr, cts_tr = np.unique(y_train_all, return_counts=True)
+    cls_keep = cls_tr[cts_tr >= min_train]
+    X_train, y_train = filtrar_por_classes(X_train_all, y_train_all, cls_keep)
+    X_test, y_test = filtrar_por_classes(X_test_all, y_test_all, np.unique(y_train))
+    print(f"[Etapa 3/7] Train(filtrado): X={X_train.shape} | classes={len(np.unique(y_train))}")
+    print(f"[Etapa 3/7] Test (alinhado): X={X_test.shape} | classes={len(np.unique(y_test))}")
 
-    if Xf.shape[0] == 0:
-        raise RuntimeError("Seleção de classes resultou em dataset vazio. Ajuste frac_classes/min_amostras.")
+    # Etapa 4: padronizar com stats do TREINO
+    print("\n[Etapa 4/7] Padronizando features (z-score) com stats do TREINO.")
+    mean_tr, std_tr = fit_standardizer(X_train, eps=float(CONFIG["eps_std"]))
+    X_train_feat = apply_standardizer(X_train, mean_tr, std_tr)
+    X_test_feat = apply_standardizer(X_test, mean_tr, std_tr)
+    print(f"[Etapa 4/7] X_train_feat dtype={X_train_feat.dtype} | X_test_feat dtype={X_test_feat.dtype}")
 
-    # 2) split treino/teste
-    print(f"\n[Etapa 2/7] Split treino/teste (test_frac={CONFIG['test_frac']})...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        Xf, yf, test_size=CONFIG["test_frac"], random_state=CONFIG["seed_split"], stratify=yf
-    )
-    print(f"[Etapa 2/7] Train: {X_train.shape} | Test: {X_test.shape}")
-
-    # 3) garante mínimo no treino para manter classes
-    min_train = max(CONFIG["min_train_por_classe"], CONFIG["k_folds"])
-    print(f"\n[Etapa 3/7] Garantindo mínimo de {min_train} amostras por classe no TREINO (pré-CV)...")
-    X_train, y_train, classes_train = filtrar_min_train_por_classe(X_train, y_train, min_train=min_train)
-    print(f"[Etapa 3/7] Train após filtro: {X_train.shape} | n classes: {len(classes_train)}")
-
-    # filtra o teste para manter mesmas classes do treino (evita classes inexistentes)
-    mask_test = np.isin(y_test, classes_train)
-    X_test = X_test[mask_test]
-    y_test = y_test[mask_test]
-    print(f"[Etapa 3/7] Test após alinhar classes: {X_test.shape} | n classes: {len(np.unique(y_test))}")
-
-    if len(np.unique(y_train)) < 2:
-        raise RuntimeError("Treino ficou com <2 classes após filtros. Ajuste frac_classes/min_train.")
-
-    # 4) padronização (média/var do treino completo)
-    print("\n[Etapa 4/7] Padronizando features (mean/std do TREINO)...")
-    mu = X_train.mean(axis=0, keepdims=True).astype(np.float32)
-    sd = X_train.std(axis=0, keepdims=True).astype(np.float32)
-    sd = np.maximum(sd, CONFIG["eps_std"])
-
-    X_train_feat = ((X_train - mu) / sd).astype(np.float32)
-    X_test_feat = ((X_test - mu) / sd).astype(np.float32)
-
-    # 5) amostrar treino para CV (cv_frac), garantindo >= k_folds por classe
-    print(f"\n[Etapa 5/7] Amostrando TREINO para CV: {100*CONFIG['cv_frac']:.2f}% (seed={CONFIG['seed_split']}) "
-          f"com {CONFIG['k_folds']} por classe...")
-
-    def amostrar_para_cv_por_classes(y_full: np.ndarray, frac: float, seed: int, min_por_classe: int):
-        rng = np.random.default_rng(seed)
-        classes = np.unique(y_full)
-
-        idx_keep = []
-        for c in classes:
-            idx_c = np.flatnonzero(y_full == c)
-            if len(idx_c) < min_por_classe:
-                continue
-            pick = rng.choice(idx_c, size=min_por_classe, replace=False)
-            idx_keep.append(pick)
-
-        if len(idx_keep) == 0:
-            return np.array([], dtype=np.int64), classes
-
-        idx_keep = np.concatenate(idx_keep).astype(np.int64)
-
-        target = int(np.ceil(frac * len(y_full)))
-        target = max(target, len(idx_keep))
-        if target == len(idx_keep):
-            return np.unique(idx_keep), classes
-
-        remaining = np.setdiff1d(np.arange(len(y_full), dtype=np.int64), idx_keep, assume_unique=False)
-        y_rem = y_full[remaining]
-
-        add = target - len(idx_keep)
-        if add <= 0:
-            return np.unique(idx_keep), classes
-
-        if len(remaining) <= add:
-            idx_final = np.unique(np.concatenate([idx_keep, remaining]))
-            return idx_final.astype(np.int64), classes
-
-        try:
-            sss = StratifiedShuffleSplit(n_splits=1, train_size=add, random_state=seed)
-            idx_add_local, _ = next(sss.split(np.zeros_like(y_rem), y_rem))
-            idx_add = remaining[idx_add_local]
-        except Exception:
-            idx_add = rng.choice(remaining, size=add, replace=False)
-
-        idx_final = np.unique(np.concatenate([idx_keep, idx_add]).astype(np.int64))
-        return idx_final, classes
-
-    idx_cv, _ = amostrar_para_cv_por_classes(
-        y_train, frac=CONFIG["cv_frac"], seed=CONFIG["seed_split"], min_por_classe=CONFIG["k_folds"]
+    # Etapa 5: amostra para CV garantindo >=k por classe
+    min_cv = int(CONFIG["cv_min_por_classe"] if CONFIG["cv_min_por_classe"] is not None else CONFIG["k_folds"])
+    print(f"\n[Etapa 5/7] Amostrando TREINO para CV: frac={CONFIG['cv_frac']:.4f} com min_por_classe={min_cv} ...")
+    idx_cv, _ = amostrar_com_min_por_classe(
+        y=y_train,
+        frac=float(CONFIG["cv_frac"]),
+        seed=int(CONFIG["seed_split"]),
+        min_por_classe=min_cv,
     )
     if idx_cv.size == 0:
         raise RuntimeError("Amostra para CV ficou vazia. Ajuste cv_frac/min_amostras/k_folds.")
-
     X_cv = X_train_feat[idx_cv]
     y_cv = y_train[idx_cv]
-    print(f"[Etapa 5/7] CV sample: X={X_cv.shape} | classes={len(np.unique(y_cv))}")
     _, cts = np.unique(y_cv, return_counts=True)
+    print(f"[Etapa 5/7] CV sample: X={X_cv.shape} | classes={len(np.unique(y_cv))}")
     print(f"[Etapa 5/7] min count por classe no CV sample = {int(cts.min())} (deve ser >= {CONFIG['k_folds']})")
 
-    # 6) escolher lambdas por CV (grid reduzido)
-    epochs_cv = int(CONFIG.get("epochs_cv", CONFIG.get("epochs", 50)))
-    print(f"\n[Etapa 6/7] Rodando grid-search por CV (com Armijo + L1/L2) | epochs_cv={epochs_cv}...")
-    (best_l1, best_l2), best_score, best_alpha_med = escolher_melhores_lambdas_por_cv(
+    # Etapa 6: grid-search por CV (combos limitados)
+    epochs_cv = int(CONFIG["epochs_cv"])
+    print(f"\n[Etapa 6/7] Rodando grid-search por CV (Armijo + L1/L2) | epochs_cv={epochs_cv} ...")
+    best = escolher_melhores_lambdas_por_cv(
         X_train_feat=X_cv,
         y_train_labels=y_cv,
-        classes_fixas=np.unique(y_cv).astype(np.int64),
-        k_folds=CONFIG["k_folds"],
+        classes_fixas=np.unique(y_cv).astype(np.int64, copy=False),
+        k_folds=int(CONFIG["k_folds"]),
         grid_l1=CONFIG["grid_l1"],
         grid_l2=CONFIG["grid_l2"],
-        epochs=epochs_cv,
-        alpha_init=CONFIG["alpha_init"],
-        beta=CONFIG["armijo_beta"],
-        sigma=CONFIG["armijo_sigma"],
-        seed=CONFIG["seed_split"],
-        max_combos=CONFIG.get("max_combos_cv", 8),
-        combo_strategy=CONFIG.get("combo_strategy_cv", "cover"),
-        seed_combos=CONFIG.get("seed_combos_cv", CONFIG["seed_split"]),
+        epochs=int(epochs_cv),
+        batch_size=int(CONFIG["batch_size_cv"]),
+        seed=int(CONFIG["seed_split"]),
+        max_combos=int(CONFIG["max_combos_cv"]),
+        combo_strategy=str(CONFIG["combo_strategy_cv"]),
+        seed_combos=int(CONFIG["seed_combos_cv"]),
     )
-    print(f"\n[CV] Melhor: l1={best_l1} | l2={best_l2} | mean_acc={best_score:.4f} | alpha_mediana~{best_alpha_med:.3e}")
+    (best_l1, best_l2), best_score, best_alpha_med = best
+    print(f"\n[CV] Melhor: l1={best_l1} | l2={best_l2} | mean_acc={best_score:.4f} | alpha_mediana~{best_alpha_med}")
 
-    # 7) treino final em amostra maior (final_frac) e avaliação no teste
-    epochs_final = int(CONFIG.get("epochs_final", CONFIG.get("epochs", 80)))
-    print(f"\n[Etapa 7/7] Treino final em {100*CONFIG['final_frac']:.1f}% do treino | epochs_final={epochs_final}...")
-    idx_final = amostrar_estratificado(y_train, frac=CONFIG["final_frac"], seed=CONFIG["seed_split"])
+    # Etapa 7: treino final (amostra maior) e avaliação no teste
+    epochs_final = int(CONFIG["epochs_final"])
+    print(f"\n[Etapa 7/7] Treino final em frac={CONFIG['final_frac']:.3f} do treino | epochs_final={epochs_final}.")
+    idx_final, _ = amostrar_com_min_por_classe(
+        y=y_train,
+        frac=float(CONFIG["final_frac"]),
+        seed=int(CONFIG["seed_split"]) + 999,
+        min_por_classe=int(CONFIG["final_min_por_classe"]),
+    )
     X_final = X_train_feat[idx_final]
     y_final = y_train[idx_final]
-    classes_final = np.unique(y_final).astype(np.int64)
+    classes_final = np.unique(y_final).astype(np.int64, copy=False)
+
+    # garante teste alinhado às classes do modelo final (se final_frac < 1)
+    X_test_final, y_test_final = filtrar_por_classes(X_test_feat, y_test, classes_final)
 
     print(f"[Etapa 7/7] Final sample: X={X_final.shape} | classes={len(classes_final)}")
+    print(f"[Etapa 7/7] Teste alinhado ao FINAL: X={X_test_final.shape} | classes={len(np.unique(y_test_final))}")
 
-    modelo_final = treinar_softmax_armijo(
+    modelo_final = treinar_softmax_elasticnet_sgd(
         X_train=X_final,
         y_train=y_final,
-        classes_fixas=classes_final,
-        l1=float(best_l1), l2=float(best_l2),
-        epochs=epochs_final,
-        alpha_init=best_alpha_med if best_alpha_med is not None else CONFIG["alpha_init"],
-        beta=CONFIG["armijo_beta"], sigma=CONFIG["armijo_sigma"],
-        seed=CONFIG["seed_split"] + 999,
+        classes_modelo=classes_final,
+        l1=float(best_l1),
+        l2=float(best_l2),
+        epochs=int(epochs_final),
+        batch_size=int(CONFIG["batch_size_final"]),
+        seed=int(CONFIG["seed_split"]) + 2025,
+        use_armijo=True,
     )
 
-    # avaliação treino (na amostra final) e teste
-    y_pred_train, P_train = predict_labels(X_final, modelo_final["W"], modelo_final["b"], modelo_final["classes"])
-    y_pred_test, P_test = predict_labels(X_test_feat, modelo_final["W"], modelo_final["b"], modelo_final["classes"])
+    print("\n[Resumo Armijo FINAL]")
+    st = modelo_final["stats"]
+    print(f"  alpha_mean={st['alpha_mean']:.3e} | alpha_median={st['alpha_median']:.3e} | "
+          f"alpha_min={st['alpha_min']:.3e} | alpha_max={st['alpha_max']:.3e}")
+    print(f"  backtracks_mean={st['armijo_backtracks_mean']:.2f} | backtracks_max={st['armijo_backtracks_max']}")
+
+    # avaliação
+    y_pred_train, _ = predict_labels(X_final, modelo_final["W"], modelo_final["b"], modelo_final["classes"])
+    y_pred_test, P_test = predict_labels(X_test_final, modelo_final["W"], modelo_final["b"], modelo_final["classes"])
 
     report_accuracy("TREINO(final sample)", y_final, y_pred_train)
-    report_accuracy("TESTE", y_test, y_pred_test)
+    report_accuracy("TESTE", y_test_final, y_pred_test)
 
-    mostrar_exemplos_previsao(y_test, y_pred_test, P_test, n=CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
-    matriz_confusao_top_k(y_test, y_pred_test, top_k=CONFIG["top_k_confusao"])
+    mostrar_exemplos_previsao(y_test_final, y_pred_test, P_test, n=CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
+    matriz_confusao_top_k(y_test_final, y_pred_test, top_k=CONFIG["top_k_confusao"])
 
 
 if __name__ == "__main__":
