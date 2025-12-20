@@ -194,7 +194,18 @@ def gradiente_descendente(
     verbose: bool,
     imprimir_a_cada_n_lotes: int = 25
 ):
+    """
+    GD com passo escolhido por line search (backtracking) usando condição de Armijo.
+    Mantém a mesma API do seu script: taxa_aprendizado é o alpha inicial.
+    """
     rng = np.random.default_rng(seed)
+
+    # ---- Parâmetros do Armijo (fixos aqui para não alterar CONFIG / API) ----
+    c = 1e-4          # parâmetro Armijo (suficiente diminuição)
+    rho = 0.5         # fator de redução do passo (backtracking)
+    max_backtracks = 12
+    alpha_min = 1e-10
+    # ------------------------------------------------------------------------
 
     params = {}
     for k, v in params_iniciais.items():
@@ -215,11 +226,56 @@ def gradiente_descendente(
             Xb = X[lote]
             Yb = Y[lote]
 
-            perda, grads = funcao_perda_grad(params, Xb, Yb)
+            # perda e gradiente no ponto atual
+            perda0, grads = funcao_perda_grad(params, Xb, Yb)
 
-            for nome_param in grads:
-                params[nome_param] = params[nome_param] - taxa_aprendizado * grads[nome_param]
+            # norma^2 do gradiente (somando todos os parâmetros)
+            grad_norm_sq = 0.0
+            for nome_param, g in grads.items():
+                grad_norm_sq += float(np.sum(g * g))
 
+            # se gradiente ~0, não atualiza
+            if grad_norm_sq <= 0.0:
+                continue
+
+            # direção de descida p = -grad
+            alpha = float(taxa_aprendizado)  # alpha inicial (o seu antigo LR fixo)
+
+            # backtracking Armijo
+            aceitou = False
+            while True:
+                # params_candidate = params - alpha * grad
+                params_cand = {}
+                for nome_param in params:
+                    if nome_param in grads:
+                        params_cand[nome_param] = params[nome_param] - alpha * grads[nome_param]
+                    else:
+                        params_cand[nome_param] = params[nome_param]
+
+                perda_cand, _ = funcao_perda_grad(params_cand, Xb, Yb)
+
+                # Condição de Armijo:
+                # f(x + alpha*p) <= f(x) + c*alpha*<grad, p>
+                # com p = -grad => <grad,p> = -||grad||^2
+                if perda_cand <= perda0 - c * alpha * grad_norm_sq:
+                    aceitou = True
+                    params = params_cand
+                    break
+
+                alpha *= rho
+                if alpha < alpha_min:
+                    break
+                if max_backtracks <= 0:
+                    break
+                max_backtracks -= 1
+
+            # (opcional) se não aceitou, ainda assim dá um passo minúsculo (evita travar total)
+            if not aceitou:
+                alpha = max(alpha, alpha_min)
+                for nome_param in grads:
+                    params[nome_param] = params[nome_param] - alpha * grads[nome_param]
+
+            # progresso
             if (num_lote % imprimir_a_cada_n_lotes == 0) or (num_lote == n_lotes):
                 print(f"[Treino] Época {epoca+1}/{epocas} | Lote {num_lote}/{n_lotes}", end="\r")
 
@@ -227,9 +283,10 @@ def gradiente_descendente(
         if verbose:
             perda_full, _ = funcao_perda_grad(params, X, Y)
             historico.append(float(perda_full))
-            print(f"[GD] Época {epoca+1}/{epocas} | perda={perda_full:.6f}")
+            print(f"[GD+Armijo] Época {epoca+1}/{epocas} | perda={perda_full:.6f}")
 
     return params, historico
+
 
 # ============================================================
 # Regressão Linear Multiclasse (MSE vs one-hot) + Elastic Net
