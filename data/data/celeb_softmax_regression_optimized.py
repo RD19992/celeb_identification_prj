@@ -13,7 +13,7 @@ CONFIG = {
     "dataset_filename": "celeba_hog_128x128_o9.joblib",
 
     # prototipagem / seleção de classes
-    "frac_classes": 1.0,          # fração das CLASSES ELEGÍVEIS (ex.: 0.005 = 0.5%)
+    "frac_classes": 1.00,          # fração das CLASSES ELEGÍVEIS (ex.: 0.005 = 0.5%)
     "seed_classes": 42,
     "min_amostras_por_classe": 25,  # mínimo no dataset inteiro p/ ser elegível
 
@@ -27,20 +27,29 @@ CONFIG = {
     "k_folds": 5,
     "seed_cv": 42,
 
+    # [ALTERAÇÃO 2] Tamanhos separados de amostra do TREINO:
+    #  - uma amostra menor para CV (rápido),
+    #  - outra maior para o treino final (mais representativa).
+    # Interpretação: fração do conjunto de TREINO (após split), não do dataset inteiro.
+    "frac_amostras_cv": 0.05,       # 5% do TREINO para CV
+    "frac_amostras_final": 0.20,    # 20% do TREINO para treino final
+    "seed_amostras_cv": 123,
+    "seed_amostras_final": 456,
+
     # grid lambdas
     "lambda_l1_grid": [0.0, 0.05, 0.1, 0.5],
     "lambda_l2_grid": [0.0, 0.05, 0.1, 0.5],
 
     # treino
     "epocas_cv": 15,
-    "epocas_final": 30,
+    "epocas_final": 100,
 
     # ========================================================
     # SGD (sem Armijo): LR fixo + decaimento por época
     # lr_epoch = max(lr_min, lr_inicial * (lr_decay ** epoch))
     # ========================================================
-    "lr_inicial": 0.05,   # <- seguro; evite 0.5
-    "lr_decay": 0.95,
+    "lr_inicial": 0.02,   # <- seguro; evite 0.5
+    "lr_decay": 0.98,
     "lr_min": 1e-4,
 
     "tamanho_lote": 256,
@@ -101,17 +110,19 @@ def mostrar_previsoes_amostrais(y_true: np.ndarray, y_pred: np.ndarray, n_amostr
 
 
 # ============================================================
-# Padronização (z-score)
+# [ALTERAÇÃO 1] Padronização (z-score) - tudo float32
 # ============================================================
 
 def fit_standardizer(X_train: np.ndarray, eps: float):
+    # [ALTERAÇÃO 1] força float32
     X_train = X_train.astype(np.float32, copy=False)
-    mean = np.mean(X_train, axis=0).astype(np.float32, copy=False)
-    std = np.std(X_train, axis=0).astype(np.float32, copy=False)
-    std = np.maximum(std, eps).astype(np.float32, copy=False)
+    mean = np.mean(X_train, axis=0, dtype=np.float32).astype(np.float32, copy=False)
+    std = np.std(X_train, axis=0, dtype=np.float32).astype(np.float32, copy=False)
+    std = np.maximum(std, np.float32(eps)).astype(np.float32, copy=False)
     return mean, std
 
 def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
+    # [ALTERAÇÃO 1] força float32
     X = X.astype(np.float32, copy=False)
     return (X - mean) / std
 
@@ -208,38 +219,134 @@ def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_trai
 
 
 # ============================================================
+# [ALTERAÇÃO 2] Amostragem do TREINO (duas amostras):
+#   - CV: escolhe um subconjunto de classes e pega "k_folds" por classe até bater ~frac
+#   - Final: pega fração por classe (mantém proporções), restrita às classes do CV
+# ============================================================
+
+def amostrar_para_cv_por_classes(y_train: np.ndarray, frac: float, seed: int, min_por_classe: int):
+    """
+    Objetivo: formar uma amostra ~ frac * N_treino mas que seja "CV-friendly":
+      - inclui classes com pelo menos min_por_classe exemplos no treino,
+      - e pega min_por_classe exemplos por classe escolhida.
+
+    Isso evita o caso impossível de "5% das amostras" com milhares de classes onde
+    cada classe ficaria com 1 exemplo e o StratifiedKFold quebraria.
+    """
+    rng = np.random.default_rng(seed)
+    y_train = np.asarray(y_train)
+
+    N = int(len(y_train))
+    alvo = max(min_por_classe, int(np.round(frac * N)))
+    if alvo <= 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    classes, counts = np.unique(y_train, return_counts=True)
+    classes_ok = classes[counts >= min_por_classe]
+
+    if len(classes_ok) == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    rng.shuffle(classes_ok)
+
+    idx_por_classe = {}
+    for c in classes_ok.tolist():
+        idx = np.where(y_train == c)[0]
+        rng.shuffle(idx)
+        idx_por_classe[int(c)] = idx
+
+    amostra = []
+    classes_escolhidas = []
+
+    for c in classes_ok.tolist():
+        c = int(c)
+        idx = idx_por_classe[c]
+        if len(idx) < min_por_classe:
+            continue
+        amostra.append(idx[:min_por_classe])
+        classes_escolhidas.append(c)
+        if sum(len(a) for a in amostra) >= alvo:
+            break
+
+    if len(amostra) == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    amostra_idx = np.concatenate(amostra).astype(np.int64, copy=False)
+
+    # se passou do alvo, corta aleatoriamente (mantendo mistura)
+    if len(amostra_idx) > alvo:
+        rng.shuffle(amostra_idx)
+        amostra_idx = amostra_idx[:alvo]
+
+    classes_escolhidas = np.array(classes_escolhidas, dtype=np.int64)
+    return amostra_idx, classes_escolhidas
+
+def amostrar_final_estratificado(y_train: np.ndarray, classes_permitidas: np.ndarray, frac: float, seed: int):
+    """
+    Amostragem estratificada por classe:
+      - para cada classe permitida, pega round(frac * count) (mínimo 1).
+    """
+    rng = np.random.default_rng(seed)
+    y_train = np.asarray(y_train)
+    classes_permitidas = np.asarray(classes_permitidas, dtype=np.int64)
+
+    amostra = []
+    for c in classes_permitidas.tolist():
+        idx = np.where(y_train == c)[0]
+        if len(idx) == 0:
+            continue
+        rng.shuffle(idx)
+        take = int(np.round(frac * len(idx)))
+        take = max(1, min(take, len(idx)))
+        amostra.append(idx[:take])
+
+    if len(amostra) == 0:
+        return np.array([], dtype=np.int64)
+
+    amostra_idx = np.concatenate(amostra).astype(np.int64, copy=False)
+    rng.shuffle(amostra_idx)
+    return amostra_idx
+
+
+# ============================================================
 # Softmax + Weighted CE (SEM one-hot) + Elastic Net correto p/ SGD
-#   - L2: entra no gradiente
-#   - L1: proximal step (soft-threshold)
-#   - Regularização escalada por n_train_total (não depende do batch)
+#   - [ALTERAÇÃO 1] tudo float32
+#   - [ALTERAÇÃO 3] sem one-hot global (usa o "truque")
 # ============================================================
 
 def compute_class_weights_from_yidx(y_idx: np.ndarray, K: int, eps: float = 1e-12) -> np.ndarray:
-    counts = np.bincount(y_idx, minlength=K).astype(np.float64)
-    counts_safe = np.maximum(counts, 1.0)
-    total = float(np.sum(counts))
+    # [ALTERAÇÃO 1] tudo float32 (evita float64)
+    counts = np.bincount(y_idx, minlength=K).astype(np.float32, copy=False)
+    counts_safe = np.maximum(counts, np.float32(1.0))
+    total = np.sum(counts_safe).astype(np.float32, copy=False)
     # peso inversamente proporcional à frequência (média ~1)
-    w = total / (K * counts_safe + eps)
-    return w.astype(np.float32)
+    w = total / (np.float32(K) * counts_safe + np.float32(eps))
+    return w.astype(np.float32, copy=False)
 
 def softmax_probs(logits: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    # [ALTERAÇÃO 1] float32
     z = logits - np.max(logits, axis=1, keepdims=True)
     expz = np.exp(z).astype(np.float32, copy=False)
-    return expz / (np.sum(expz, axis=1, keepdims=True) + eps)
+    denom = np.sum(expz, axis=1, keepdims=True).astype(np.float32, copy=False) + np.float32(eps)
+    return (expz / denom).astype(np.float32, copy=False)
 
 def data_loss_wce(params: dict, X: np.ndarray, y_idx: np.ndarray, class_weights: np.ndarray, eps: float = 1e-12) -> float:
+    # [ALTERAÇÃO 1] computations em float32
     W = params["W"]
     b = params["b"]
-    logits = X @ W.T + b
+    logits = (X @ W.T + b).astype(np.float32, copy=False)
     P = softmax_probs(logits, eps=eps)
     p_true = P[np.arange(len(y_idx)), y_idx]
     w = class_weights[y_idx].astype(np.float32, copy=False)
-    return float(-np.mean(w.astype(np.float64) * np.log(p_true + eps)))
+    loss = -np.mean(w * np.log(p_true + np.float32(eps)), dtype=np.float32)
+    return float(loss)
 
 def reg_loss_elasticnet(params: dict, lambda_l1: float, lambda_l2: float, n_train_total: int) -> float:
+    # [ALTERAÇÃO 1] float32
     W = params["W"]
-    # escala por n_train_total (fixa)
-    reg = (lambda_l1 * float(np.sum(np.abs(W))) + 0.5 * lambda_l2 * float(np.sum(W * W))) / float(max(n_train_total, 1))
+    n = np.float32(max(n_train_total, 1))
+    reg = (np.float32(lambda_l1) * np.sum(np.abs(W), dtype=np.float32) +
+           np.float32(0.5) * np.float32(lambda_l2) * np.sum(W * W, dtype=np.float32)) / n
     return float(reg)
 
 def batch_grad_softmax_wce_l2(
@@ -254,37 +361,41 @@ def batch_grad_softmax_wce_l2(
     """
     Retorna grads (W,b) para o termo de dados (WCE) + L2.
     L1 NÃO entra aqui (vamos aplicar proximal depois).
+
+    [ALTERAÇÃO 3] SEM one-hot global: usa o "truque padrão":
+      P[range(m), y] -= 1
     """
     W = params["W"]
     b = params["b"]
-    m = Xb.shape[0]
+    m = int(Xb.shape[0])
     if m <= 0:
         return 0.0, {"W": np.zeros_like(W), "b": np.zeros_like(b)}
 
-    logits = Xb @ W.T + b
+    logits = (Xb @ W.T + b).astype(np.float32, copy=False)
     P = softmax_probs(logits, eps=eps)  # (m,K)
 
     w = class_weights[yb_idx].astype(np.float32, copy=False)  # (m,)
     p_true = P[np.arange(m), yb_idx]
-    loss_data = float(-np.mean(w.astype(np.float64) * np.log(p_true + eps)))
+    loss_data = -np.mean(w * np.log(p_true + np.float32(eps)), dtype=np.float32)
 
-    # truque padrão
+    # [ALTERAÇÃO 3] truque padrão (SEM one-hot):
     dlogits = P
-    dlogits[np.arange(m), yb_idx] -= 1.0
-    dlogits *= (w[:, None] / float(m)).astype(np.float32, copy=False)
+    dlogits[np.arange(m), yb_idx] -= np.float32(1.0)
+    dlogits *= (w[:, None] / np.float32(m)).astype(np.float32, copy=False)
 
-    grad_W = dlogits.T @ Xb   # (K,d)
-    grad_b = np.sum(dlogits, axis=0)  # (K,)
+    grad_W = (dlogits.T @ Xb).astype(np.float32, copy=False)   # (K,d)
+    grad_b = np.sum(dlogits, axis=0, dtype=np.float32).astype(np.float32, copy=False)  # (K,)
 
     # L2 escalada por n_train_total (fixa, não depende do batch)
     if lambda_l2 != 0.0:
-        grad_W += (lambda_l2 / float(max(n_train_total, 1))) * W
+        grad_W += (np.float32(lambda_l2) / np.float32(max(n_train_total, 1))) * W
 
-    return loss_data, {"W": grad_W.astype(np.float32, copy=False), "b": grad_b.astype(np.float32, copy=False)}
+    return float(loss_data), {"W": grad_W, "b": grad_b}
 
 def proximal_l1(W: np.ndarray, shrink: float) -> np.ndarray:
     # soft-threshold
-    return np.sign(W) * np.maximum(np.abs(W) - shrink, 0.0).astype(np.float32, copy=False)
+    shrink = np.float32(shrink)
+    return (np.sign(W) * np.maximum(np.abs(W) - shrink, np.float32(0.0))).astype(np.float32, copy=False)
 
 
 # ============================================================
@@ -311,12 +422,12 @@ def treinar_softmax_elasticnet_sgd(
 
     y_idx, classes, _ = codificar_rotulos_com_classes(y_train, classes_fixas)
     K = len(classes)
-    d = X_train.shape[1]
+    d = int(X_train.shape[1])
     n_train_total = int(X_train.shape[0])
 
     class_weights = compute_class_weights_from_yidx(y_idx, K)
 
-    # init
+    # [ALTERAÇÃO 1] init em float32
     W = rng.normal(0.0, 0.01, size=(K, d)).astype(np.float32)
     b = np.zeros(K, dtype=np.float32)
     params = {"W": W, "b": b}
@@ -330,6 +441,7 @@ def treinar_softmax_elasticnet_sgd(
 
     for epoca in range(epocas):
         lr = max(lr_min, lr_inicial * (lr_decay ** epoca))
+        lr32 = np.float32(lr)
         idx = rng.permutation(n_train_total)
 
         for lote_i, ini in enumerate(range(0, n_train_total, tamanho_lote), start=1):
@@ -344,12 +456,12 @@ def treinar_softmax_elasticnet_sgd(
             )
 
             # grad step
-            params["W"] -= lr * grads["W"]
-            params["b"] -= lr * grads["b"]
+            params["W"] -= lr32 * grads["W"]
+            params["b"] -= lr32 * grads["b"]
 
             # proximal L1 (escala por n_train_total)
             if lambda_l1 != 0.0:
-                shrink = lr * (lambda_l1 / float(max(n_train_total, 1)))
+                shrink = lr32 * (np.float32(lambda_l1) / np.float32(max(n_train_total, 1)))
                 params["W"] = proximal_l1(params["W"], shrink)
 
             stats["updates_total"] += 1
@@ -370,7 +482,7 @@ def treinar_softmax_elasticnet_sgd(
             loss_data = data_loss_wce(params, X_train[sub].astype(np.float32, copy=False), y_idx[sub], class_weights)
             loss_reg = reg_loss_elasticnet(params, lambda_l1, lambda_l2, n_train_total)
             loss_total = loss_data + loss_reg
-            hist.append(loss_total)
+            hist.append(np.float32(loss_total))
             print(f"[SGD] Época {epoca+1}/{epocas} | lr={lr:.3e} | loss~(data+reg)={loss_total:.6f}")
 
     modelo = {
@@ -390,7 +502,7 @@ def prever(modelo: dict, X: np.ndarray):
     W = modelo["W"]
     b = modelo["b"]
     classes = modelo["classes"]
-    logits = X.astype(np.float32, copy=False) @ W.T + b
+    logits = (X.astype(np.float32, copy=False) @ W.T + b).astype(np.float32, copy=False)
     pred_idx = np.argmax(logits, axis=1)
     return classes[pred_idx], logits
 
@@ -492,8 +604,9 @@ def imprimir_matriz_confusao(cm: np.ndarray, row_labels, col_labels, titulo: str
         print(line)
 
         if normalize_rows and s > 0:
-            frac = row.astype(np.float64) / s
-            line2 = (" " * w_label) + "  " + " ".join(_fmt_float(v, w_cell, d=3) for v in frac) + " | " + _fmt_float(1.0, w_cell, d=3)
+            # [ALTERAÇÃO 1] float32 (só para consistência; é display)
+            frac = (row.astype(np.float32) / np.float32(s)).astype(np.float32, copy=False)
+            line2 = (" " * w_label) + "  " + " ".join(_fmt_float(float(v), w_cell, d=3) for v in frac) + " | " + _fmt_float(1.0, w_cell, d=3)
             print(line2)
 
     print("=" * 72 + "\n")
@@ -593,6 +706,10 @@ def main():
     data = joblib.load(DATASET_PATH)
     X, y = data["X"], data["y"]
 
+    # [ALTERAÇÃO 1] força X float32 desde o início (evita "puxar" float64 no @)
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+
     print("\n[Info] Dataset original")
     print("X:", X.shape, X.dtype)
     print("y:", y.shape, y.dtype)
@@ -602,7 +719,7 @@ def main():
 
     # Seleção de classes
     print(
-        f"\n[Etapa 1/6] Selecionando {CONFIG['frac_classes']*100:.3f}% das classes ELEGÍVEIS (seed={CONFIG['seed_classes']}) "
+        f"\n[Etapa 1/7] Selecionando {CONFIG['frac_classes']*100:.3f}% das classes ELEGÍVEIS (seed={CONFIG['seed_classes']}) "
         f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe..."
     )
     X, y, escolhidas = selecionar_classes_aleatorias_entre_elegiveis(
@@ -617,43 +734,104 @@ def main():
         print("Sugestões: diminua min_amostras_por_classe, ou aumente frac_classes, ou ambos.")
         return
 
-    print("[Etapa 1/6] Após filtro:")
+    print("[Etapa 1/7] Após filtro:")
     print("  X:", X.shape, "| n classes:", len(np.unique(y)), "| classes escolhidas:", len(escolhidas))
 
     # Split
     print(
-        f"\n[Etapa 2/6] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
+        f"\n[Etapa 2/7] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
         f"com mínimo {CONFIG['n_min_treino_por_classe']} no treino por classe..."
     )
-    X_train, X_test, y_train, y_test = split_estratificado_min_treino(
+    X_train_all, X_test_all, y_train_all, y_test_all = split_estratificado_min_treino(
         X, y,
         test_frac=CONFIG["test_frac"],
         seed=CONFIG["seed_split"],
         min_treino_por_classe=CONFIG["n_min_treino_por_classe"]
     )
 
-    # filtro p/ CV estratificado
-    print(f"\n[Etapa 3/6] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (para CV)...")
-    X_train, y_train, X_test, y_test, classes_ok = filtrar_classes_min_train_para_cv(
-        X_train, y_train, X_test, y_test, min_train_por_classe=CONFIG["k_folds"]
+    # filtro p/ CV estratificado básico (classes com pelo menos k_folds no TREINO)
+    print(f"\n[Etapa 3/7] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (pré-CV)...")
+    X_train_all, y_train_all, X_test_all, y_test_all, classes_ok = filtrar_classes_min_train_para_cv(
+        X_train_all, y_train_all, X_test_all, y_test_all, min_train_por_classe=CONFIG["k_folds"]
     )
 
-    if X_train.shape[0] == 0 or len(np.unique(y_train)) == 0:
-        print("\n[ERRO] Após garantir CV, não sobrou treino suficiente.")
+    if X_train_all.shape[0] == 0 or len(np.unique(y_train_all)) == 0:
+        print("\n[ERRO] Após garantir pré-CV, não sobrou treino suficiente.")
         print("Sugestões: aumente frac_classes ou reduza min_amostras_por_classe.")
         return
 
-    print("[Etapa 3/6] Shapes após filtro p/ CV:")
-    print("  Train:", X_train.shape, y_train.shape, "| n classes:", len(np.unique(y_train)))
-    print("  Test :", X_test.shape, y_test.shape, "| n classes:", len(np.unique(y_test)))
+    print("[Etapa 3/7] Shapes após filtro pré-CV:")
+    print("  Train(all):", X_train_all.shape, y_train_all.shape, "| n classes:", len(np.unique(y_train_all)))
+    print("  Test (all):", X_test_all.shape, y_test_all.shape, "| n classes:", len(np.unique(y_test_all)))
 
-    classes_fixas = np.unique(y_train)
+    # --------------------------------------------------------
+    # [ALTERAÇÃO 2] Amostras separadas de TREINO:
+    #   - CV: ~5% do treino (por classes, pegando k_folds por classe)
+    #   - Final: ~20% do treino (estratificado), restrito às classes do CV
+    # --------------------------------------------------------
+    print(
+        f"\n[Etapa 4/7] Amostrando TREINO para CV: {CONFIG['frac_amostras_cv']*100:.2f}% "
+        f"(seed={CONFIG['seed_amostras_cv']}) com {CONFIG['k_folds']} por classe..."
+    )
+    idx_cv, classes_cv = amostrar_para_cv_por_classes(
+        y_train_all,
+        frac=CONFIG["frac_amostras_cv"],
+        seed=CONFIG["seed_amostras_cv"],
+        min_por_classe=CONFIG["k_folds"]
+    )
+
+    if len(idx_cv) == 0 or len(classes_cv) == 0:
+        print("\n[ERRO] Amostra de CV ficou vazia.")
+        print("Sugestões: aumente frac_amostras_cv ou reduza k_folds (ou aumente min_amostras_por_classe).")
+        return
+
+    X_train_cv_raw = X_train_all[idx_cv]
+    y_train_cv = y_train_all[idx_cv]
+    classes_fixas = np.unique(y_train_cv).astype(np.int64, copy=False)
+
+    print("[Etapa 4/7] CV sample:")
+    print("  X_train_cv:", X_train_cv_raw.shape, "| n classes:", len(classes_fixas))
+
+    # Treino final: filtra treino_all para só classes do CV, e amostra 20%
+    mask_final_pool = np.isin(y_train_all, classes_fixas)
+    X_train_pool = X_train_all[mask_final_pool]
+    y_train_pool = y_train_all[mask_final_pool]
+
+    print(
+        f"\n[Etapa 5/7] Amostrando TREINO para treino final: {CONFIG['frac_amostras_final']*100:.2f}% "
+        f"(seed={CONFIG['seed_amostras_final']}) restrito às classes do CV..."
+    )
+    idx_final = amostrar_final_estratificado(
+        y_train_pool,
+        classes_permitidas=classes_fixas,
+        frac=CONFIG["frac_amostras_final"],
+        seed=CONFIG["seed_amostras_final"]
+    )
+
+    if len(idx_final) == 0:
+        print("\n[ERRO] Amostra de treino final ficou vazia.")
+        print("Sugestões: aumente frac_amostras_final ou aumente frac_amostras_cv (mais classes).")
+        return
+
+    X_train_final_raw = X_train_pool[idx_final]
+    y_train_final = y_train_pool[idx_final]
+
+    print("[Etapa 5/7] Final train sample:")
+    print("  X_train_final:", X_train_final_raw.shape, "| n classes:", len(np.unique(y_train_final)))
+
+    # Teste: restringe apenas às classes treinadas (classes_fixas)
+    mask_test = np.isin(y_test_all, classes_fixas)
+    X_test = X_test_all[mask_test]
+    y_test = y_test_all[mask_test]
+
+    print("\n[Info] Teste restrito às classes do modelo (classes_fixas):")
+    print("  X_test:", X_test.shape, "| n classes:", len(np.unique(y_test)))
 
     # CV (scaler dentro do fold)
-    print(f"\n[Etapa 4/6] CV estratificado (k={CONFIG['k_folds']}) para escolher lambdas...")
+    print(f"\n[Etapa 6/7] CV estratificado (k={CONFIG['k_folds']}) para escolher lambdas (usando amostra CV)...")
     best = escolher_melhores_lambdas_por_cv(
-        X_train_raw=X_train,
-        y_train=y_train,
+        X_train_raw=X_train_cv_raw,
+        y_train=y_train_cv,
         classes_fixas=classes_fixas,
         lambda_l1_grid=CONFIG["lambda_l1_grid"],
         lambda_l2_grid=CONFIG["lambda_l2_grid"],
@@ -663,16 +841,16 @@ def main():
     best_mean_err, best_l1, best_l2 = best
     print(f"\n[CV] Melhor: mean_err={best_mean_err:.4f} | l1={best_l1} | l2={best_l2}")
 
-    # scaler final (treino inteiro)
-    print("\n[Etapa 5/6] Padronizando features (z-score) com stats do TREINO...")
-    mean_tr, std_tr = fit_standardizer(X_train, eps=CONFIG["std_eps"])
-    X_train_feat = apply_standardizer(X_train, mean_tr, std_tr)
+    # scaler final (usa amostra do treino final)
+    print("\n[Etapa 7/7] Padronizando features (z-score) com stats do TREINO FINAL...")
+    mean_tr, std_tr = fit_standardizer(X_train_final_raw, eps=CONFIG["std_eps"])
+    X_train_feat = apply_standardizer(X_train_final_raw, mean_tr, std_tr)
     X_test_feat = apply_standardizer(X_test, mean_tr, std_tr)
 
     # treino final
-    print(f"\n[Etapa 6/6] Treinando modelo final (SGD, epocas={CONFIG['epocas_final']})...")
+    print(f"\n[Treino FINAL] Treinando modelo final (SGD, epocas={CONFIG['epocas_final']})...")
     modelo_final = treinar_softmax_elasticnet_sgd(
-        X_train_feat, y_train, classes_fixas,
+        X_train_feat, y_train_final, classes_fixas,
         lambda_l1=best_l1, lambda_l2=best_l2,
         lr_inicial=CONFIG["lr_inicial"],
         lr_decay=CONFIG["lr_decay"],
@@ -687,12 +865,12 @@ def main():
 
     # treino
     y_pred_train, _ = prever(modelo_final, X_train_feat)
-    err_train = calcular_erro_classificacao(y_train.astype(np.int64), y_pred_train.astype(np.int64))
-    print(f"\n[Resultado] TREINO: erro={err_train:.4f} | acurácia={1.0-err_train:.4f}")
+    err_train = calcular_erro_classificacao(y_train_final.astype(np.int64), y_pred_train.astype(np.int64))
+    print(f"\n[Resultado] TREINO (final sample): erro={err_train:.4f} | acurácia={1.0-err_train:.4f}")
 
     # exemplos
     if CONFIG["exemplos_de"].lower() == "treino":
-        mostrar_previsoes_amostrais(y_train, y_pred_train, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
+        mostrar_previsoes_amostrais(y_train_final, y_pred_train, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
     else:
         y_pred_test, _ = prever(modelo_final, X_test_feat)
         mostrar_previsoes_amostrais(y_test, y_pred_test, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
