@@ -97,7 +97,7 @@ plt.show()
 
 
 # Para reduzir tempos de processamento vamos reduzir tamanho para 128 x 128
-IMG_SIZE = (64, 64)
+IMG_SIZE = (128, 128)
 
 # O HOG usa somente intensidades. Vamos usar tons de cinza
 def preprocess_image_cv2(path):
