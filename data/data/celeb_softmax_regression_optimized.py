@@ -4,6 +4,7 @@ from pathlib import Path
 from itertools import product
 from sklearn.model_selection import StratifiedKFold
 
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -11,21 +12,22 @@ from sklearn.model_selection import StratifiedKFold
 CONFIG = {
     "dataset_filename": "celeba_hog_128x128_o9.joblib",
 
-    # prototipagem
-    "frac_classes": 0.02,          # fração das CLASSES ELEGÍVEIS
+    # prototipagem / seleção de classes
+    "frac_classes": 0.005,          # fração das CLASSES ELEGÍVEIS (ex.: 0.005 = 0.5%)
     "seed_classes": 42,
-    "min_amostras_por_classe": 20,  # mínimo no dataset inteiro
+    "min_amostras_por_classe": 25,  # mínimo no dataset inteiro p/ ser elegível
 
     # split
     "test_frac": 0.20,
     "seed_split": 42,
-    "n_min_treino_por_classe": 25,  # garante esse mínimo indo pro treino
+    # recomendo ser < min_amostras_por_classe pra sobrar teste até quando count==min
+    "n_min_treino_por_classe": 20,
 
     # CV
     "k_folds": 3,
     "seed_cv": 42,
 
-    # lambdas
+    # grid lambdas
     "lambda_l1_grid": [0.0, 0.05, 0.1, 0.5],
     "lambda_l2_grid": [0.0, 0.05, 0.1, 0.5],
 
@@ -37,27 +39,26 @@ CONFIG = {
     # SGD (sem Armijo): LR fixo + decaimento por época
     # lr_epoch = max(lr_min, lr_inicial * (lr_decay ** epoch))
     # ========================================================
-    "lr_inicial": 0.5,
+    "lr_inicial": 0.05,   # <- seguro; evite 0.5
     "lr_decay": 0.95,
     "lr_min": 1e-4,
 
     "tamanho_lote": 256,
     "imprimir_a_cada_n_lotes": 25,
 
-    # (X - mean_train) / (std_train + eps)
+    # z-score
     "std_eps": 1e-8,
+
+    # diagnóstico / logging
+    "avaliar_loss_subamostra_por_epoca": True,
+    "loss_subamostra_max": 5000,
+    "diag_seed": 42,
 
     # output
     "n_exemplos_previsao": 10,
-    "exemplos_de": "teste",
-
-    # diagnóstico
-    "diag_seed": 42,
-    "diag_max_amostras_prob": 5000,
-
-    # Para full dataset, recomendo colocar False (fica MUITO mais rápido).
-    "avaliar_loss_full_a_cada_epoca": True,
+    "exemplos_de": "teste",  # "treino" ou "teste"
 }
+
 
 # ============================================================
 # Diagnóstico HOG
@@ -71,21 +72,21 @@ def diagnostico_dim_hog(d: int):
     if d == 8100:
         print("[Diagnóstico HOG] d=8100 sugere HOG 128x128 (o9, cell8, block2).")
         return
-
     est_cells_minus_1 = np.sqrt(max(d, 1) / 36.0)
     est_img = 8.0 * (est_cells_minus_1 + 1.0)
     print("[Diagnóstico HOG] d não bate com 64x64/128x128 típicos.")
     print(f"[Diagnóstico HOG] Estimativa grosseira de IMG_SIZE ≈ {est_img:.1f}px (assumindo o9, cell8, block2).")
 
+
 # ============================================================
-# Utilitários
+# Utilitários (labels, métricas)
 # ============================================================
 
 def codificar_rotulos_com_classes(y: np.ndarray, classes: np.ndarray):
-    classes = np.asarray(classes)
+    classes = np.asarray(classes, dtype=np.int64)
     mapa = {int(c): i for i, c in enumerate(classes.tolist())}
     y_idx = np.array([mapa[int(v)] for v in y], dtype=np.int64)
-    return y_idx, classes.astype(np.int64), mapa
+    return y_idx, classes, mapa
 
 def calcular_erro_classificacao(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(y_true != y_pred))
@@ -98,15 +99,9 @@ def mostrar_previsoes_amostrais(y_true: np.ndarray, y_pred: np.ndarray, n_amostr
     for t, i in enumerate(idx, start=1):
         print(f"  #{t:02d} | y_true={int(y_true[i])} -> y_pred={int(y_pred[i])}")
 
-def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_train_por_classe: int):
-    classes, counts = np.unique(y_train, return_counts=True)
-    classes_ok = classes[counts >= min_train_por_classe]
-    mask_tr = np.isin(y_train, classes_ok)
-    mask_te = np.isin(y_test, classes_ok)
-    return X_train[mask_tr], y_train[mask_tr], X_test[mask_te], y_test[mask_te], classes_ok
 
 # ============================================================
-# Padronização (z-score) com stats do treino
+# Padronização (z-score)
 # ============================================================
 
 def fit_standardizer(X_train: np.ndarray, eps: float):
@@ -120,36 +115,46 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
     X = X.astype(np.float32, copy=False)
     return (X - mean) / std
 
+
 # ============================================================
-# Seleção de classes (CORRIGIDA): elegíveis primeiro
+# Seleção de classes: elegíveis primeiro
 # ============================================================
 
 def selecionar_classes_aleatorias_entre_elegiveis(X, y, frac_classes: float, seed: int, min_amostras_por_classe: int):
     rng = np.random.default_rng(seed)
-
     classes_all, counts_all = np.unique(y, return_counts=True)
     elegiveis = classes_all[counts_all >= min_amostras_por_classe]
 
-    print(f"[Seleção] Classes elegíveis (>= {min_amostras_por_classe} amostras): {len(elegiveis)} de {len(classes_all)}")
+    print(f"[Seleção] Classes elegíveis (>= {min_amostras_por_classe}): {len(elegiveis)} de {len(classes_all)}")
 
     if len(elegiveis) == 0:
-        return X[:0], y[:0], elegiveis  # vazio
+        return X[:0], y[:0], elegiveis
 
-    n_escolher = max(1, int(np.round(frac_classes * len(elegiveis))))
-    n_escolher = min(n_escolher, len(elegiveis))
+    if frac_classes >= 1.0:
+        escolhidas = elegiveis
+    else:
+        n_escolher = max(1, int(np.round(frac_classes * len(elegiveis))))
+        n_escolher = min(n_escolher, len(elegiveis))
+        escolhidas = rng.choice(elegiveis, size=n_escolher, replace=False)
 
-    escolhidas = rng.choice(elegiveis, size=n_escolher, replace=False)
     mask = np.isin(y, escolhidas)
-    return X[mask], y[mask], escolhidas
+    return X[mask], y[mask], np.asarray(escolhidas, dtype=y.dtype)
+
 
 # ============================================================
-# Split garantindo treino por classe
+# Split estratificado com mínimo no treino e (quando possível) 1+ no teste
 # ============================================================
 
-def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_treino_por_classe: int = 1):
+def split_estratificado_min_treino(
+    X: np.ndarray,
+    y: np.ndarray,
+    test_frac: float,
+    seed: int,
+    min_treino_por_classe: int
+):
     rng = np.random.default_rng(seed)
-    n = len(y)
-    test_n = int(np.round(test_frac * n))
+    X = np.asarray(X)
+    y = np.asarray(y)
 
     order = np.argsort(y)
     y_sorted = y[order]
@@ -157,326 +162,289 @@ def split_garantindo_treino_por_classe(X, y, test_frac: float, seed: int, n_min_
     end_idx = np.append(start_idx[1:], len(y_sorted))
 
     train_idx = []
-    resto_idx = []
+    test_idx = []
 
     for s, e in zip(start_idx, end_idx):
         grp = order[s:e]
         rng.shuffle(grp)
-        take = min(n_min_treino_por_classe, len(grp))
-        train_idx.append(grp[:take])
-        resto_idx.append(grp[take:])
+        n_i = len(grp)
+
+        if n_i <= 1:
+            train_idx.append(grp)
+            continue
+
+        # garante min no treino, mas não pode consumir tudo
+        min_tr = min(min_treino_por_classe, n_i - 1)
+        # define teste alvo, garantindo 1 se sobrar
+        test_target = int(np.round(test_frac * n_i))
+        if test_target <= 0:
+            test_target = 1
+        # garante que sobra >= min_tr no treino
+        max_test = n_i - min_tr
+        test_take = min(test_target, max_test)
+
+        # Se por algum motivo max_test==0, vai tudo pro treino
+        if test_take <= 0:
+            train_idx.append(grp)
+        else:
+            test_idx.append(grp[:test_take])
+            train_idx.append(grp[test_take:])
 
     train_idx = np.concatenate(train_idx) if len(train_idx) else np.array([], dtype=np.int64)
-    resto_idx = np.concatenate(resto_idx) if len(resto_idx) else np.array([], dtype=np.int64)
+    test_idx = np.concatenate(test_idx) if len(test_idx) else np.array([], dtype=np.int64)
 
-    if test_n > len(resto_idx):
-        test_n = len(resto_idx)
-
-    test_idx = rng.choice(resto_idx, size=test_n, replace=False)
-    test_set = set(test_idx.tolist())
-    resto_para_treino = np.array([i for i in resto_idx if i not in test_set], dtype=np.int64)
-
-    train_idx = np.concatenate([train_idx, resto_para_treino])
     rng.shuffle(train_idx)
     rng.shuffle(test_idx)
 
     return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
+
+def filtrar_classes_min_train_para_cv(X_train, y_train, X_test, y_test, min_train_por_classe: int):
+    classes, counts = np.unique(y_train, return_counts=True)
+    classes_ok = classes[counts >= min_train_por_classe]
+    mask_tr = np.isin(y_train, classes_ok)
+    mask_te = np.isin(y_test, classes_ok)
+    return X_train[mask_tr], y_train[mask_tr], X_test[mask_te], y_test[mask_te], classes_ok
+
+
 # ============================================================
-# Softmax + Weighted CE + Elastic Net (SEM one-hot)
+# Softmax + Weighted CE (SEM one-hot) + Elastic Net correto p/ SGD
+#   - L2: entra no gradiente
+#   - L1: proximal step (soft-threshold)
+#   - Regularização escalada por n_train_total (não depende do batch)
 # ============================================================
 
 def compute_class_weights_from_yidx(y_idx: np.ndarray, K: int, eps: float = 1e-12) -> np.ndarray:
     counts = np.bincount(y_idx, minlength=K).astype(np.float64)
     counts_safe = np.maximum(counts, 1.0)
     total = float(np.sum(counts))
+    # peso inversamente proporcional à frequência (média ~1)
     w = total / (K * counts_safe + eps)
     return w.astype(np.float32)
 
-def perda_e_gradiente_softmax_wce_elasticnet_yidx(
+def softmax_probs(logits: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    z = logits - np.max(logits, axis=1, keepdims=True)
+    expz = np.exp(z).astype(np.float32, copy=False)
+    return expz / (np.sum(expz, axis=1, keepdims=True) + eps)
+
+def data_loss_wce(params: dict, X: np.ndarray, y_idx: np.ndarray, class_weights: np.ndarray, eps: float = 1e-12) -> float:
+    W = params["W"]
+    b = params["b"]
+    logits = X @ W.T + b
+    P = softmax_probs(logits, eps=eps)
+    p_true = P[np.arange(len(y_idx)), y_idx]
+    w = class_weights[y_idx].astype(np.float32, copy=False)
+    return float(-np.mean(w.astype(np.float64) * np.log(p_true + eps)))
+
+def reg_loss_elasticnet(params: dict, lambda_l1: float, lambda_l2: float, n_train_total: int) -> float:
+    W = params["W"]
+    # escala por n_train_total (fixa)
+    reg = (lambda_l1 * float(np.sum(np.abs(W))) + 0.5 * lambda_l2 * float(np.sum(W * W))) / float(max(n_train_total, 1))
+    return float(reg)
+
+def batch_grad_softmax_wce_l2(
     params: dict,
-    X: np.ndarray,
-    y_idx: np.ndarray,
+    Xb: np.ndarray,
+    yb_idx: np.ndarray,
     class_weights: np.ndarray,
-    lambda_l1: float,
     lambda_l2: float,
+    n_train_total: int,
     eps: float = 1e-12
 ):
     """
-    Weighted Cross-Entropy sem one-hot:
-      loss = mean( w[y] * -log(p_y) ) + reg/m
-      dlogits = w[y]*(P - onehot(y))/m
-
-    W: (K, d)
-    b: (K,)
-    X: (m, d)
-    y_idx: (m,)
+    Retorna grads (W,b) para o termo de dados (WCE) + L2.
+    L1 NÃO entra aqui (vamos aplicar proximal depois).
     """
     W = params["W"]
     b = params["b"]
-    m = X.shape[0]
-
+    m = Xb.shape[0]
     if m <= 0:
         return 0.0, {"W": np.zeros_like(W), "b": np.zeros_like(b)}
 
-    X = X.astype(np.float32, copy=False)
-    y_idx = y_idx.astype(np.int64, copy=False)
+    logits = Xb @ W.T + b
+    P = softmax_probs(logits, eps=eps)  # (m,K)
 
-    # logits (m, K)
-    logits = X @ W.T + b
-    logits = logits - np.max(logits, axis=1, keepdims=True)
+    w = class_weights[yb_idx].astype(np.float32, copy=False)  # (m,)
+    p_true = P[np.arange(m), yb_idx]
+    loss_data = float(-np.mean(w.astype(np.float64) * np.log(p_true + eps)))
 
-    expz = np.exp(logits).astype(np.float32, copy=False)
-    P = expz / (np.sum(expz, axis=1, keepdims=True) + eps)
+    # truque padrão
+    dlogits = P
+    dlogits[np.arange(m), yb_idx] -= 1.0
+    dlogits *= (w[:, None] / float(m)).astype(np.float32, copy=False)
 
-    # WCE
-    w_per_sample = class_weights[y_idx].astype(np.float32, copy=False)
-    p_true = P[np.arange(m), y_idx]
-    wce = -float(np.mean(w_per_sample.astype(np.float64) * np.log(p_true + eps)))
+    grad_W = dlogits.T @ Xb   # (K,d)
+    grad_b = np.sum(dlogits, axis=0)  # (K,)
 
-    # reg (/m conforme sua versão atual)
-    reg = (lambda_l1 * float(np.sum(np.abs(W))) + 0.5 * lambda_l2 * float(np.sum(W * W))) / float(m)
-    loss = wce + reg
+    # L2 escalada por n_train_total (fixa, não depende do batch)
+    if lambda_l2 != 0.0:
+        grad_W += (lambda_l2 / float(max(n_train_total, 1))) * W
 
-    # grad (truque padrão)
-    dlogits = P  # in-place ok (não usamos P depois disso)
-    dlogits[np.arange(m), y_idx] -= 1.0
-    dlogits *= (w_per_sample[:, None] / float(m)).astype(np.float32, copy=False)
+    return loss_data, {"W": grad_W.astype(np.float32, copy=False), "b": grad_b.astype(np.float32, copy=False)}
 
-    grad_W = dlogits.T @ X                      # (K, d)
-    grad_b = np.sum(dlogits, axis=0)            # (K,)
+def proximal_l1(W: np.ndarray, shrink: float) -> np.ndarray:
+    # soft-threshold
+    return np.sign(W) * np.maximum(np.abs(W) - shrink, 0.0).astype(np.float32, copy=False)
 
-    grad_W += (lambda_l2 * W) / float(m)
-    grad_W += (lambda_l1 * np.sign(W)) / float(m)
-
-    return float(loss), {"W": grad_W.astype(np.float32, copy=False), "b": grad_b.astype(np.float32, copy=False)}
 
 # ============================================================
-# SGD/MBGD com LR fixo + decaimento
+# SGD com LR fixo + decaimento
 # ============================================================
 
-def gradiente_descendente_lr_decay(
-    params_iniciais: dict,
-    funcao_perda_grad,
-    X: np.ndarray,
-    y_idx: np.ndarray,
+def treinar_softmax_elasticnet_sgd(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    classes_fixas: np.ndarray,
+    lambda_l1: float,
+    lambda_l2: float,
     lr_inicial: float,
     lr_decay: float,
     lr_min: float,
     epocas: int,
-    tamanho_lote: int | None,
+    tamanho_lote: int,
     seed: int,
-    verbose: bool,
-    imprimir_a_cada_n_lotes: int = 25,
-    avaliar_loss_full_a_cada_epoca: bool = True
+    imprimir_a_cada_n_lotes: int,
+    avaliar_loss_subamostra_por_epoca: bool,
+    loss_subamostra_max: int,
 ):
     rng = np.random.default_rng(seed)
 
-    params = {k: np.array(v, copy=True) for k, v in params_iniciais.items()}
+    y_idx, classes, _ = codificar_rotulos_com_classes(y_train, classes_fixas)
+    K = len(classes)
+    d = X_train.shape[1]
+    n_train_total = int(X_train.shape[0])
 
-    n = X.shape[0]
-    if tamanho_lote is None or tamanho_lote <= 0 or tamanho_lote > n:
-        tamanho_lote = n
+    class_weights = compute_class_weights_from_yidx(y_idx, K)
 
-    n_lotes = int(np.ceil(n / tamanho_lote))
-    historico = []
-    stats = {
-        "updates_total": 0,
-        "lr_inicial": float(lr_inicial),
-        "lr_decay": float(lr_decay),
-        "lr_min": float(lr_min),
-        "lr_min_observado": float("inf"),
-        "lr_max_observado": 0.0,
-    }
+    # init
+    W = rng.normal(0.0, 0.01, size=(K, d)).astype(np.float32)
+    b = np.zeros(K, dtype=np.float32)
+    params = {"W": W, "b": b}
+
+    if tamanho_lote is None or tamanho_lote <= 0 or tamanho_lote > n_train_total:
+        tamanho_lote = n_train_total
+    n_lotes = int(np.ceil(n_train_total / tamanho_lote))
+
+    hist = []
+    stats = {"updates_total": 0, "lr0": float(lr_inicial), "decay": float(lr_decay), "lr_min": float(lr_min)}
 
     for epoca in range(epocas):
-        lr_epoca = max(lr_min, lr_inicial * (lr_decay ** epoca))
-        stats["lr_min_observado"] = min(stats["lr_min_observado"], lr_epoca)
-        stats["lr_max_observado"] = max(stats["lr_max_observado"], lr_epoca)
+        lr = max(lr_min, lr_inicial * (lr_decay ** epoca))
+        idx = rng.permutation(n_train_total)
 
-        idx = rng.permutation(n)
+        for lote_i, ini in enumerate(range(0, n_train_total, tamanho_lote), start=1):
+            batch = idx[ini:ini + tamanho_lote]
+            Xb = X_train[batch].astype(np.float32, copy=False)
+            yb = y_idx[batch]
 
-        for num_lote, ini in enumerate(range(0, n, tamanho_lote), start=1):
-            lote = idx[ini:ini + tamanho_lote]
-            Xb = X[lote]
-            yb = y_idx[lote]
+            loss_b, grads = batch_grad_softmax_wce_l2(
+                params, Xb, yb, class_weights,
+                lambda_l2=lambda_l2,
+                n_train_total=n_train_total
+            )
 
-            loss_b, grads = funcao_perda_grad(params, Xb, yb)
+            # grad step
+            params["W"] -= lr * grads["W"]
+            params["b"] -= lr * grads["b"]
 
-            params["W"] -= lr_epoca * grads["W"]
-            params["b"] -= lr_epoca * grads["b"]
+            # proximal L1 (escala por n_train_total)
+            if lambda_l1 != 0.0:
+                shrink = lr * (lambda_l1 / float(max(n_train_total, 1)))
+                params["W"] = proximal_l1(params["W"], shrink)
+
             stats["updates_total"] += 1
 
-            if (num_lote % imprimir_a_cada_n_lotes == 0) or (num_lote == n_lotes):
+            if (lote_i % imprimir_a_cada_n_lotes == 0) or (lote_i == n_lotes):
                 print(
-                    f"[Treino] Época {epoca+1}/{epocas} | Lote {num_lote}/{n_lotes} | "
-                    f"lr={lr_epoca:.3e} | loss_batch={loss_b:.4f}",
+                    f"[Treino] Época {epoca+1}/{epocas} | Lote {lote_i}/{n_lotes} | "
+                    f"lr={lr:.3e} | loss_batch(data)={loss_b:.4f}",
                     end="\r"
                 )
 
         print(" " * 120, end="\r")
 
-        if verbose and avaliar_loss_full_a_cada_epoca:
-            loss_full, _ = funcao_perda_grad(params, X, y_idx)
-            historico.append(float(loss_full))
-            print(f"[SGD] Época {epoca+1}/{epocas} | lr={lr_epoca:.3e} | loss_full={loss_full:.6f}")
-        elif verbose:
-            print(f"[SGD] Época {epoca+1}/{epocas} | lr={lr_epoca:.3e}")
+        # loss por época (subamostra) + reg (computado 1x por época)
+        if avaliar_loss_subamostra_por_epoca:
+            m = min(n_train_total, int(loss_subamostra_max))
+            sub = rng.choice(n_train_total, size=m, replace=False)
+            loss_data = data_loss_wce(params, X_train[sub].astype(np.float32, copy=False), y_idx[sub], class_weights)
+            loss_reg = reg_loss_elasticnet(params, lambda_l1, lambda_l2, n_train_total)
+            loss_total = loss_data + loss_reg
+            hist.append(loss_total)
+            print(f"[SGD] Época {epoca+1}/{epocas} | lr={lr:.3e} | loss~(data+reg)={loss_total:.6f}")
 
-    return params, historico, stats
-
-# ============================================================
-# Treino / Predição
-# ============================================================
-
-def treinar_regressao_linear_multiclasse_elasticnet(
-    X_treino, y_treino, classes_fixas,
-    lambda_l1, lambda_l2,
-    lr_inicial, lr_decay, lr_min,
-    epocas, tamanho_lote,
-    seed, verbose, imprimir_a_cada_n_lotes,
-    avaliar_loss_full_a_cada_epoca: bool = True
-):
-    y_idx, classes, _ = codificar_rotulos_com_classes(y_treino, classes_fixas)
-    K = len(classes)
-    d = X_treino.shape[1]
-
-    class_weights = compute_class_weights_from_yidx(y_idx, K)
-
-    rng = np.random.default_rng(seed)
-    W0 = rng.normal(0.0, 0.01, size=(K, d)).astype(np.float32)
-    b0 = np.zeros(K, dtype=np.float32)
-    params0 = {"W": W0, "b": b0}
-
-    def f(params, Xb, yb_idx):
-        return perda_e_gradiente_softmax_wce_elasticnet_yidx(
-            params, Xb, yb_idx,
-            class_weights=class_weights,
-            lambda_l1=lambda_l1,
-            lambda_l2=lambda_l2
-        )
-
-    params_finais, historico, stats_gd = gradiente_descendente_lr_decay(
-        params0, f,
-        X_treino.astype(np.float32, copy=False),
-        y_idx,
-        lr_inicial=lr_inicial,
-        lr_decay=lr_decay,
-        lr_min=lr_min,
-        epocas=epocas,
-        tamanho_lote=tamanho_lote,
-        seed=seed,
-        verbose=verbose,
-        imprimir_a_cada_n_lotes=imprimir_a_cada_n_lotes,
-        avaliar_loss_full_a_cada_epoca=avaliar_loss_full_a_cada_epoca
-    )
-
-    return {
-        "W": params_finais["W"],
-        "b": params_finais["b"],
+    modelo = {
+        "W": params["W"],
+        "b": params["b"],
         "classes": classes,
-        "historico_perda": historico,
+        "class_weights": class_weights,
         "lambda_l1": float(lambda_l1),
         "lambda_l2": float(lambda_l2),
-        "class_weights": class_weights,
-        "gd_stats": stats_gd,
+        "n_train_total": int(n_train_total),
+        "hist_loss": hist,
+        "stats": stats,
     }
+    return modelo
 
-def prever_regressao_linear_multiclasse(modelo, X):
-    W, b, classes = modelo["W"], modelo["b"], modelo["classes"]
-    logits = X.astype(np.float32, copy=False) @ W.T + b
-    idx_pred = np.argmax(logits, axis=1)
-    return classes[idx_pred], logits
-
-# ============================================================
-# Diagnóstico (pós-treino)
-# ============================================================
-
-def diagnostico_modelo(modelo, y_train, y_pred_train, logits_train=None, titulo="Diagnóstico", max_amostras_prob=5000, seed=42):
-    rng = np.random.default_rng(seed)
-    classes = modelo["classes"]
-    K = len(classes)
-    n = len(y_train)
-
-    print("\n" + "=" * 72)
-    print(f"[{titulo}]")
-    print("=" * 72)
-    print(f"N treino = {n} | K (classes) = {K}")
-    print(f"Baseline aleatório 1/K = {1.0 / max(K, 1):.6f}")
-
-    vals, cnt = np.unique(y_train, return_counts=True)
-    maj = float(np.max(cnt) / n) if n > 0 else 0.0
-    print(f"Baseline maioria = {maj:.6f} | y_train min/med/max = {int(np.min(cnt))}/{int(np.median(cnt))}/{int(np.max(cnt))}")
-
-    vals_p, cnt_p = np.unique(y_pred_train, return_counts=True)
-    cobertura = len(vals_p) / max(K, 1)
-    top = np.argsort(cnt_p)[::-1][:10]
-    print(f"Predições únicas = {len(vals_p)}/{K} (cobertura={cobertura:.3f})")
-    print("Top-10 classes preditas (classe, count, fração):")
-    for i in top:
-        print(f"  {int(vals_p[i])} | {int(cnt_p[i])} | {cnt_p[i] / n:.4f}")
-
+def prever(modelo: dict, X: np.ndarray):
     W = modelo["W"]
-    absW = np.abs(W)
-    print(f"||W||_2={float(np.linalg.norm(W)):.3e} | max|W|={float(np.max(absW)):.3e} | sparsity(|W|<1e-10)={float(np.mean(absW<1e-10)):.3f}")
+    b = modelo["b"]
+    classes = modelo["classes"]
+    logits = X.astype(np.float32, copy=False) @ W.T + b
+    pred_idx = np.argmax(logits, axis=1)
+    return classes[pred_idx], logits
 
-    if logits_train is not None and n > 0:
-        m = min(n, max_amostras_prob)
-        idx = rng.choice(n, size=m, replace=False)
-        L = logits_train[idx].astype(np.float32, copy=False)
-        z = L - np.max(L, axis=1, keepdims=True)
-        expz = np.exp(z).astype(np.float32, copy=False)
-        P = expz / (np.sum(expz, axis=1, keepdims=True) + 1e-12)
-        pmax = np.max(P, axis=1)
-        print(f"Confiança (amostra={m}): mean(max softmax)={float(np.mean(pmax)):.4f} | med={float(np.median(pmax)):.4f} | p90={float(np.quantile(pmax, 0.90)):.4f}")
-
-    st = modelo.get("gd_stats", {})
-    if st:
-        upd = max(int(st.get("updates_total", 0)), 1)
-        print(
-            f"SGD: updates={upd} | lr0={st.get('lr_inicial'):.3e} | decay={st.get('lr_decay'):.4f} | "
-            f"lr_min={st.get('lr_min'):.3e} | lr_min_obs={st.get('lr_min_observado'):.3e} | lr_max_obs={st.get('lr_max_observado'):.3e}"
-        )
-
-    print("=" * 72 + "\n")
 
 # ============================================================
-# CV
+# CV estratificado (SEM vazamento de scaler)
 # ============================================================
 
-def escolher_melhores_lambdas_por_cv(X_train, y_train, classes_fixas, lambda_l1_grid, lambda_l2_grid, k_folds, seed_cv, treino_cfg):
+def escolher_melhores_lambdas_por_cv(
+    X_train_raw: np.ndarray,
+    y_train: np.ndarray,
+    classes_fixas: np.ndarray,
+    lambda_l1_grid,
+    lambda_l2_grid,
+    k_folds: int,
+    seed_cv: int,
+):
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed_cv)
     combos = list(product(lambda_l1_grid, lambda_l2_grid))
     melhor = None
 
-    total_combos = len(combos)
-    print(f"[CV] Grid-search: {total_combos} combinações | {k_folds}-fold estratificado")
+    total = len(combos)
+    print(f"[CV] Grid-search: {total} combinações | {k_folds}-fold estratificado")
 
     for c_idx, (l1, l2) in enumerate(combos, start=1):
         erros = []
-        print(f"\n[CV] Combo {c_idx}/{total_combos}: l1={l1} | l2={l2}")
+        print(f"\n[CV] Combo {c_idx}/{total}: l1={l1} | l2={l2}")
 
-        for f_idx, (tr_idx, va_idx) in enumerate(skf.split(X_train, y_train), start=1):
-            X_tr, y_tr = X_train[tr_idx], y_train[tr_idx]
-            X_va, y_va = X_train[va_idx], y_train[va_idx]
+        for f_idx, (tr_idx, va_idx) in enumerate(skf.split(X_train_raw, y_train), start=1):
+            X_tr_raw, y_tr = X_train_raw[tr_idx], y_train[tr_idx]
+            X_va_raw, y_va = X_train_raw[va_idx], y_train[va_idx]
+
+            # scaler do fold (sem vazamento)
+            mean_f, std_f = fit_standardizer(X_tr_raw, eps=CONFIG["std_eps"])
+            X_tr = apply_standardizer(X_tr_raw, mean_f, std_f)
+            X_va = apply_standardizer(X_va_raw, mean_f, std_f)
 
             print(f"[CV]  Fold {f_idx}/{k_folds} - treinando...")
 
-            modelo = treinar_regressao_linear_multiclasse_elasticnet(
+            modelo = treinar_softmax_elasticnet_sgd(
                 X_tr, y_tr, classes_fixas,
                 lambda_l1=l1, lambda_l2=l2,
-                lr_inicial=treino_cfg["lr_inicial"],
-                lr_decay=treino_cfg["lr_decay"],
-                lr_min=treino_cfg["lr_min"],
-                epocas=treino_cfg["epocas_cv"],
-                tamanho_lote=treino_cfg["tamanho_lote"],
-                seed=treino_cfg["seed_treino"] + f_idx,
-                verbose=False,
-                imprimir_a_cada_n_lotes=treino_cfg["imprimir_a_cada_n_lotes"],
-                avaliar_loss_full_a_cada_epoca=treino_cfg.get("avaliar_loss_full_a_cada_epoca", False),
+                lr_inicial=CONFIG["lr_inicial"],
+                lr_decay=CONFIG["lr_decay"],
+                lr_min=CONFIG["lr_min"],
+                epocas=CONFIG["epocas_cv"],
+                tamanho_lote=CONFIG["tamanho_lote"],
+                seed=123 + 1000 * c_idx + f_idx,
+                imprimir_a_cada_n_lotes=CONFIG["imprimir_a_cada_n_lotes"],
+                avaliar_loss_subamostra_por_epoca=False,
+                loss_subamostra_max=0,
             )
 
-            y_pred_va, _ = prever_regressao_linear_multiclasse(modelo, X_va)
+            y_pred_va, _ = prever(modelo, X_va)
             err = calcular_erro_classificacao(y_va.astype(np.int64), y_pred_va.astype(np.int64))
             erros.append(err)
             print(f"[CV]  Fold {f_idx}/{k_folds} - erro={err:.4f}")
@@ -490,8 +458,9 @@ def escolher_melhores_lambdas_por_cv(X_train, y_train, classes_fixas, lambda_l1_
 
     return melhor
 
+
 # ============================================================
-# Avaliação de teste: matriz de confusão top-10
+# Avaliação no teste: top-10 confusão + métricas
 # ============================================================
 
 def _fmt_int(x: int, w: int) -> str:
@@ -529,7 +498,7 @@ def imprimir_matriz_confusao(cm: np.ndarray, row_labels, col_labels, titulo: str
 
     print("=" * 72 + "\n")
 
-def avaliar_teste_top10(y_test: np.ndarray, y_pred_test: np.ndarray, top_k: int = 10, seed: int = 42):
+def avaliar_teste_top10(y_test: np.ndarray, y_pred_test: np.ndarray, top_k: int = 10):
     y_test = y_test.astype(np.int64, copy=False)
     y_pred_test = y_pred_test.astype(np.int64, copy=False)
 
@@ -591,6 +560,7 @@ def avaliar_teste_top10(y_test: np.ndarray, y_pred_test: np.ndarray, top_k: int 
 
         mask_c = (y_test == c)
         preds_c = y_pred_test[mask_c]
+        conf_txt = "-"
         if len(preds_c) > 0:
             vals, cnts = np.unique(preds_c, return_counts=True)
             ord2 = np.argsort(cnts)[::-1]
@@ -603,12 +573,11 @@ def avaliar_teste_top10(y_test: np.ndarray, y_pred_test: np.ndarray, top_k: int 
                 if len(conf_list) >= 3:
                     break
             conf_txt = ", ".join(conf_list) if conf_list else "-"
-        else:
-            conf_txt = "-"
 
         print(f"{c:>6} | {sup:>7} | {prec:>9.3f} | {rec:>6.3f} | {f1:>4.3f} | {conf_txt}")
 
     print("-" * 72)
+
 
 # ============================================================
 # MAIN
@@ -631,9 +600,9 @@ def main():
 
     diagnostico_dim_hog(int(X.shape[1]))
 
-    # ---- seleção corrigida
+    # Seleção de classes
     print(
-        f"\n[Etapa 1/5] Selecionando {CONFIG['frac_classes']*100:.3f}% das classes ELEGÍVEIS (seed={CONFIG['seed_classes']}) "
+        f"\n[Etapa 1/6] Selecionando {CONFIG['frac_classes']*100:.3f}% das classes ELEGÍVEIS (seed={CONFIG['seed_classes']}) "
         f"com mínimo {CONFIG['min_amostras_por_classe']} amostras/classe..."
     )
     X, y, escolhidas = selecionar_classes_aleatorias_entre_elegiveis(
@@ -648,24 +617,24 @@ def main():
         print("Sugestões: diminua min_amostras_por_classe, ou aumente frac_classes, ou ambos.")
         return
 
-    print("[Etapa 1/5] Após filtro:")
+    print("[Etapa 1/6] Após filtro:")
     print("  X:", X.shape, "| n classes:", len(np.unique(y)), "| classes escolhidas:", len(escolhidas))
 
-    # split
+    # Split
     print(
-        f"\n[Etapa 2/5] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
-        f"garantindo {CONFIG['n_min_treino_por_classe']}+ no treino..."
+        f"\n[Etapa 2/6] Split treino/teste (test_frac={CONFIG['test_frac']:.2f}) "
+        f"com mínimo {CONFIG['n_min_treino_por_classe']} no treino por classe..."
     )
-    X_train, X_test, y_train, y_test = split_garantindo_treino_por_classe(
+    X_train, X_test, y_train, y_test = split_estratificado_min_treino(
         X, y,
         test_frac=CONFIG["test_frac"],
         seed=CONFIG["seed_split"],
-        n_min_treino_por_classe=CONFIG["n_min_treino_por_classe"]
+        min_treino_por_classe=CONFIG["n_min_treino_por_classe"]
     )
 
-    # garante CV viável (>= k_folds por classe no treino)
-    print(f"\n[Etapa 3/5] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (para CV)...")
-    X_train, y_train, X_test, y_test, _ = filtrar_classes_min_train_para_cv(
+    # filtro p/ CV estratificado
+    print(f"\n[Etapa 3/6] Garantindo mínimo de {CONFIG['k_folds']} amostras por classe no TREINO (para CV)...")
+    X_train, y_train, X_test, y_test, classes_ok = filtrar_classes_min_train_para_cv(
         X_train, y_train, X_test, y_test, min_train_por_classe=CONFIG["k_folds"]
     )
 
@@ -674,96 +643,65 @@ def main():
         print("Sugestões: aumente frac_classes ou reduza min_amostras_por_classe.")
         return
 
-    print("[Etapa 3/5] Shapes após filtro p/ CV:")
+    print("[Etapa 3/6] Shapes após filtro p/ CV:")
     print("  Train:", X_train.shape, y_train.shape, "| n classes:", len(np.unique(y_train)))
     print("  Test :", X_test.shape, y_test.shape, "| n classes:", len(np.unique(y_test)))
 
-    # ---- z-score
-    print("\n[Etapa 3.5/5] Padronizando: (X - mean_train) / (std_train + eps)")
-    mean_train, std_train = fit_standardizer(X_train, eps=CONFIG["std_eps"])
-    X_train_feat = apply_standardizer(X_train, mean_train, std_train)
-    X_test_feat = apply_standardizer(X_test, mean_train, std_train)
-
     classes_fixas = np.unique(y_train)
 
-    # CV
-    print(f"\n[Etapa 4/5] CV estratificado (k={CONFIG['k_folds']}) para escolher lambdas...")
-    treino_cfg = {
-        "lr_inicial": CONFIG["lr_inicial"],
-        "lr_decay": CONFIG["lr_decay"],
-        "lr_min": CONFIG["lr_min"],
-        "epocas_cv": CONFIG["epocas_cv"],
-        "tamanho_lote": CONFIG["tamanho_lote"],
-        "seed_treino": 123,
-        "imprimir_a_cada_n_lotes": CONFIG["imprimir_a_cada_n_lotes"],
-        "avaliar_loss_full_a_cada_epoca": False,  # CV mais rápido
-    }
-
+    # CV (scaler dentro do fold)
+    print(f"\n[Etapa 4/6] CV estratificado (k={CONFIG['k_folds']}) para escolher lambdas...")
     best = escolher_melhores_lambdas_por_cv(
-        X_train_feat, y_train, classes_fixas,
-        CONFIG["lambda_l1_grid"], CONFIG["lambda_l2_grid"],
+        X_train_raw=X_train,
+        y_train=y_train,
+        classes_fixas=classes_fixas,
+        lambda_l1_grid=CONFIG["lambda_l1_grid"],
+        lambda_l2_grid=CONFIG["lambda_l2_grid"],
         k_folds=CONFIG["k_folds"],
         seed_cv=CONFIG["seed_cv"],
-        treino_cfg=treino_cfg
     )
     best_mean_err, best_l1, best_l2 = best
     print(f"\n[CV] Melhor: mean_err={best_mean_err:.4f} | l1={best_l1} | l2={best_l2}")
 
+    # scaler final (treino inteiro)
+    print("\n[Etapa 5/6] Padronizando features (z-score) com stats do TREINO...")
+    mean_tr, std_tr = fit_standardizer(X_train, eps=CONFIG["std_eps"])
+    X_train_feat = apply_standardizer(X_train, mean_tr, std_tr)
+    X_test_feat = apply_standardizer(X_test, mean_tr, std_tr)
+
     # treino final
-    print(f"\n[Etapa 5/5] Treinando modelo final (epocas={CONFIG['epocas_final']})...")
-    modelo_final = treinar_regressao_linear_multiclasse_elasticnet(
+    print(f"\n[Etapa 6/6] Treinando modelo final (SGD, epocas={CONFIG['epocas_final']})...")
+    modelo_final = treinar_softmax_elasticnet_sgd(
         X_train_feat, y_train, classes_fixas,
-        lambda_l1=best_l1,
-        lambda_l2=best_l2,
+        lambda_l1=best_l1, lambda_l2=best_l2,
         lr_inicial=CONFIG["lr_inicial"],
         lr_decay=CONFIG["lr_decay"],
         lr_min=CONFIG["lr_min"],
         epocas=CONFIG["epocas_final"],
         tamanho_lote=CONFIG["tamanho_lote"],
         seed=999,
-        verbose=True,
         imprimir_a_cada_n_lotes=CONFIG["imprimir_a_cada_n_lotes"],
-        avaliar_loss_full_a_cada_epoca=CONFIG["avaliar_loss_full_a_cada_epoca"],
+        avaliar_loss_subamostra_por_epoca=CONFIG["avaliar_loss_subamostra_por_epoca"],
+        loss_subamostra_max=CONFIG["loss_subamostra_max"],
     )
 
-    # erro treino
-    y_pred_train, logits_train = prever_regressao_linear_multiclasse(modelo_final, X_train_feat)
-    erro_treino = calcular_erro_classificacao(y_train.astype(np.int64), y_pred_train.astype(np.int64))
-    print(f"\n[Resultado] Erro no TREINO: {erro_treino:.4f} | Acurácia: {1.0-erro_treino:.4f}")
-
-    diagnostico_modelo(
-        modelo_final,
-        y_train=y_train.astype(np.int64),
-        y_pred_train=y_pred_train.astype(np.int64),
-        logits_train=logits_train,
-        titulo="Diagnóstico PÓS-TREINO (modelo final)",
-        max_amostras_prob=CONFIG["diag_max_amostras_prob"],
-        seed=CONFIG["diag_seed"]
-    )
+    # treino
+    y_pred_train, _ = prever(modelo_final, X_train_feat)
+    err_train = calcular_erro_classificacao(y_train.astype(np.int64), y_pred_train.astype(np.int64))
+    print(f"\n[Resultado] TREINO: erro={err_train:.4f} | acurácia={1.0-err_train:.4f}")
 
     # exemplos
     if CONFIG["exemplos_de"].lower() == "treino":
-        y_true_ex, y_pred_ex = y_train, y_pred_train
+        mostrar_previsoes_amostrais(y_train, y_pred_train, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
     else:
-        y_pred_test, _ = prever_regressao_linear_multiclasse(modelo_final, X_test_feat)
-        y_true_ex, y_pred_ex = y_test, y_pred_test
+        y_pred_test, _ = prever(modelo_final, X_test_feat)
+        mostrar_previsoes_amostrais(y_test, y_pred_test, CONFIG["n_exemplos_previsao"], seed=CONFIG["seed_split"])
 
-    mostrar_previsoes_amostrais(
-        y_true_ex.astype(np.int64),
-        y_pred_ex.astype(np.int64),
-        n_amostras=CONFIG["n_exemplos_previsao"],
-        seed=CONFIG["seed_split"]
-    )
-
-    # avaliação teste
+    # teste
     print("\n[Etapa Extra] Avaliando no TESTE (acurácia + matriz de confusão top-10)...")
-    y_pred_test_full, _ = prever_regressao_linear_multiclasse(modelo_final, X_test_feat)
-    avaliar_teste_top10(
-        y_test=y_test,
-        y_pred_test=y_pred_test_full,
-        top_k=10,
-        seed=CONFIG.get("seed_split", 42)
-    )
+    y_pred_test_full, _ = prever(modelo_final, X_test_feat)
+    avaliar_teste_top10(y_test=y_test, y_pred_test=y_pred_test_full, top_k=10)
+
 
 if __name__ == "__main__":
     main()
