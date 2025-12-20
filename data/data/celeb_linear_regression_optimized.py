@@ -5,6 +5,12 @@ from itertools import product
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.model_selection import StratifiedKFold
 
+# (Opcional) suporte a sparse sem quebrar se scipy não estiver instalado
+try:
+    from scipy import sparse  # type: ignore
+except Exception:
+    sparse = None
+
 # ============================================================
 # CONFIG (ajuste aqui para prototipagem rápida)
 # ============================================================
@@ -53,6 +59,23 @@ CONFIG = {
 # ============================================================
 # Utilitários
 # ============================================================
+
+def l2_normalize_rows(X, eps: float = 1e-12):
+    """
+    Normaliza cada amostra (linha) para norma L2=1.
+    Funciona com np.ndarray e (se scipy estiver disponível) com matrizes esparsas.
+    """
+    if (sparse is not None) and sparse.issparse(X):
+        norms = np.sqrt(X.multiply(X).sum(axis=1)).A1
+        norms = np.maximum(norms, eps)
+        inv = 1.0 / norms
+        return X.multiply(inv[:, None])
+    else:
+        X = np.asarray(X)
+        # evita divisão por zero
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        norms = np.maximum(norms, eps)
+        return X / norms
 
 def codificar_rotulos_com_classes(y: np.ndarray, classes: np.ndarray):
     """
@@ -300,13 +323,14 @@ def escolher_melhores_lambdas_por_cv(
     k_folds, seed_cv,
     treino_cfg
 ):
+    # ✅ Stratified K-Fold (você já estava usando; mantido)
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed_cv)
 
     combos = list(product(lambda_l1_grid, lambda_l2_grid))
     melhor = None  # (mean_err, l1, l2)
 
     total_combos = len(combos)
-    print(f"[CV] Iniciando grid-search: {total_combos} combinações | {k_folds}-fold CV")
+    print(f"[CV] Iniciando grid-search: {total_combos} combinações | {k_folds}-fold (estratificado)")
 
     for c_idx, (l1, l2) in enumerate(combos, start=1):
         erros = []
@@ -316,7 +340,7 @@ def escolher_melhores_lambdas_por_cv(
             X_tr, y_tr = X_train[tr_idx], y_train[tr_idx]
             X_va, y_va = X_train[va_idx], y_train[va_idx]
 
-            print(f"[CV]  Fold {f_idx}/{k_folds} - treinando...", end="\n")
+            print(f"[CV]  Fold {f_idx}/{k_folds} - treinando...")
 
             modelo = treinar_regressao_linear_multiclasse_elasticnet(
                 X_tr, y_tr, classes_fixas,
@@ -363,6 +387,10 @@ def main():
     print("y:", y.shape, y.dtype)
     print("n classes:", len(np.unique(y)))
 
+    # ✅ (1) Normalização L2 pós-HOG (por amostra)
+    print("\n[Etapa 0/5] Normalizando HOG (L2 por amostra)...")
+    X = l2_normalize_rows(X)
+
     # 1) Seleção de classes ANTES do split
     k = CONFIG["k_folds"]
     min_amostras_por_classe = max(k, 2)  # garante CV viável
@@ -397,6 +425,11 @@ def main():
     print("[Etapa 3/5] Shapes após RP:")
     print("  Train RP:", X_train_rp.shape)
     print("  Test  RP:", X_test_rp.shape)
+
+    # ✅ (1) Normalização L2 pós-RP (por amostra)
+    print("[Etapa 3/5] Normalizando pós-RP (L2 por amostra)...")
+    X_train_rp = l2_normalize_rows(X_train_rp)
+    X_test_rp  = l2_normalize_rows(X_test_rp)
 
     # classes fixas para manter o mesmo espaço de saída (K) em todos os folds
     classes_fixas = np.unique(y_train)
