@@ -1317,7 +1317,7 @@ def escolher_melhor_l2_por_cv(X: np.ndarray, y: np.ndarray, seed: int):
                     act_output=str(CONFIG["act_output"]),
                 )
 
-                y_pred, _ = predict_labels(modelo, X_va)
+                y_pred, _ = predict_labels(X_va, modelo)
                 acc = float(np.mean(y_pred == y_va))
                 accs.append(acc)
 
