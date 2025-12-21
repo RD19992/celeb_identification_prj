@@ -211,3 +211,73 @@ print("Tamanho aproximado em RAM (GB):", X.nbytes / 1024**3)
 # salvar com joblib
 dump({"X": X, "y": y}, OUTPUT_PATH, compress=3)
 print(f"Dataset HOG salvo em: {OUTPUT_PATH}")
+
+# ============================================================
+# Relatório: top-10 e bottom-10 classes (contagens) após filtro
+# Cole este bloco NO FINAL do arquivo
+# ============================================================
+
+def _report_top_bottom(labels, top_n=10, bottom_n=10, titulo=""):
+    labels = np.asarray(labels, dtype=np.int64)
+    classes, counts = np.unique(labels, return_counts=True)
+
+    ordem = np.argsort(-counts)  # desc
+    classes = classes[ordem]
+    counts = counts[ordem]
+
+    total = int(counts.sum())
+    n_classes = int(len(classes))
+    if titulo:
+        print(f"\n[{titulo}]")
+    print(f"  Instâncias: {total} | Classes: {n_classes}")
+
+    if n_classes == 0:
+        print("  (vazio)")
+        return
+
+    k_top = min(top_n, n_classes)
+    k_bot = min(bottom_n, n_classes)
+
+    sum_top = int(counts[:k_top].sum())
+    sum_bot = int(counts[-k_bot:].sum())
+
+    print(f"  Soma instâncias nas Top-{k_top}:    {sum_top}  ({100*sum_top/max(1,total):.2f}%)")
+    print(f"  Soma instâncias nas Bottom-{k_bot}: {sum_bot}  ({100*sum_bot/max(1,total):.2f}%)")
+
+    print(f"\n  Top-{k_top} classes (mais frequentes):")
+    for i in range(k_top):
+        c = int(classes[i]); cnt = int(counts[i])
+        print(f"    #{i+1:02d}  classe={c}  n={cnt}")
+
+    print(f"\n  Bottom-{k_bot} classes (menos frequentes):")
+    start = n_classes - k_bot
+    for j in range(k_bot):
+        i = start + j
+        c = int(classes[i]); cnt = int(counts[i])
+        print(f"    #{j+1:02d}  classe={c}  n={cnt}")
+
+
+# 1) Após filtro de TOP_CLASS_FRACTION (df_top existe aqui no seu script)
+if "df_top" in globals():
+    _report_top_bottom(
+        df_top["label"].values,
+        top_n=10,
+        bottom_n=10,
+        titulo=f"df_top (após filtro: TOP_CLASS_FRACTION={TOP_CLASS_FRACTION:.2f})"
+    )
+
+# 2) Após subsample de imagens (df_subset/y) — útil se PERCENT_IMAGES < 1.0
+if "df_subset" in globals():
+    _report_top_bottom(
+        df_subset["label"].values,
+        top_n=10,
+        bottom_n=10,
+        titulo=f"df_subset (após subsample: PERCENT_IMAGES={PERCENT_IMAGES:.2f})"
+    )
+elif "y" in globals():
+    _report_top_bottom(
+        y,
+        top_n=10,
+        bottom_n=10,
+        titulo=f"y (labels do subset; PERCENT_IMAGES={PERCENT_IMAGES:.2f})"
+    )
