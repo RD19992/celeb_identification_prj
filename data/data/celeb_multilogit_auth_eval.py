@@ -863,6 +863,52 @@ def main():
     print("  y_eval:", y_eval.shape, y_eval.dtype, "| classes_present:", int(np.unique(y_eval).size))
     if y_eval.size > 0:
         print(f"  N={int(y_eval.size)} (IDs válidos: 0..{int(y_eval.size)-1})")
+    # =========================
+    # TUNING (TREINO) para autenticação (anti-leakage)
+    # =========================
+    print("\n[SPLIT] Reconstruindo conjunto de TUNING (treino alinhado ao modelo) para autenticação (anti-leakage)...")
+
+    idx_global_tune = np.arange(y.size, dtype=np.int64)
+
+    classes_elig_tune = selecionar_classes_elegiveis(y, int(conf["min_amostras_por_classe"]))
+    classes_sel_tune = amostrar_classes(classes_elig_tune, float(conf["frac_classes"]), int(conf["seed_classes"]))
+
+    X1_t, y1_t, p1_t, id1_t, _ = filtrar_por_classes(
+        X, y, classes_sel_tune,
+        paths=paths if isinstance(paths, np.ndarray) else None,
+        ids=ids if isinstance(ids, np.ndarray) else None,
+        idx_global=idx_global_tune
+    )
+
+    X_train_all_t, X_test_all_t, y_train_all_t, y_test_all_t, p_train_all_t, p_test_all_t, id_train_all_t, id_test_all_t = \
+        _train_test_split_with_meta(
+            X1_t, y1_t, p1_t, id1_t,
+            test_size=float(conf["test_frac"]),
+            seed=int(conf["seed_split"]),
+        )
+
+    min_train_t = int(max(int(conf["min_train_por_classe"]), int(conf["k_folds"])))
+    cls_t, cts_t = np.unique(y_train_all_t, return_counts=True)
+    cls_keep_t = cls_t[cts_t >= min_train_t]
+
+    X_train_t, y_train_t, p_train_t, id_train_t, _ = filtrar_por_classes(
+        X_train_all_t, y_train_all_t, cls_keep_t,
+        paths=p_train_all_t, ids=id_train_all_t,
+        idx_global=None
+    )
+
+    mean = np.asarray(standardizer["mean"], dtype=np.float32)
+    std = np.asarray(standardizer["std"], dtype=np.float32)
+    X_train_feat_t = apply_standardizer(X_train_t, mean, std)
+
+    X_tune, y_tune, _p_tune, _id_tune, _ = filtrar_por_classes(
+        X_train_feat_t, y_train_t, classes_modelo,
+        paths=p_train_t, ids=id_train_t, idx_global=None
+    )
+
+    print("  X_tune:", X_tune.shape, X_tune.dtype)
+    print("  y_tune:", y_tune.shape, y_tune.dtype, "| classes_present:", int(np.unique(y_tune).size))
+
 
     # =========================
     # IDENTIFICAÇÃO
@@ -906,8 +952,13 @@ def main():
         tune_metric = "f1"
 
     print("[AUTH] Tuning balanceado de thresholds ...")
+    # (anti-leakage) o tuning de thresholds deve usar TREINO (X_tune/y_tune), não o TESTE (X_eval/y_eval)
+    y_pred_tune, P_tune, logits_tune = predict_labels_logreg(X_tune, modelo)
+    emb_tune = extract_embeddings_logits(X_tune, modelo)
+    pmax_tune = np.max(P_tune, axis=1).astype(np.float32, copy=False)
+
     ii_t, jj_t, tt_t, pair_info = build_tuning_pairs(
-        y_eval, rng=rng,
+        y_tune, rng=rng,
         pos_pairs_per_class=int(auth_cfg.get("pos_pairs_per_class", 50)),
         neg_pairs_total=int(auth_cfg.get("neg_pairs_total", 20000)),
         balanced=True
@@ -919,8 +970,8 @@ def main():
         thr_prob = 0.5
         thr_conf = 0.5
     else:
-        sims_cos = np.sum(emb[ii_t] * emb[jj_t], axis=1).astype(np.float32, copy=False)
-        sims_prob = np.sum(P[ii_t] * P[jj_t], axis=1).astype(np.float32, copy=False)
+        sims_cos = np.sum(emb_tune[ii_t] * emb_tune[jj_t], axis=1).astype(np.float32, copy=False)
+        sims_prob = np.sum(P_tune[ii_t] * P_tune[jj_t], axis=1).astype(np.float32, copy=False)
 
         pos_mask = (tt_t == 1)
         neg_mask = (tt_t == 0)
@@ -941,7 +992,7 @@ def main():
             sims_prob, tt_t, q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
         )
         thr_conf, stats_conf = tune_threshold_identity_confidence(
-            y_pred=y_pred, pmax=pmax,
+            y_pred=y_pred_tune, pmax=pmax_tune,
             ii=ii_t, jj=jj_t, truth=tt_t,
             q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
         )
