@@ -71,6 +71,11 @@ SCRIPT_CONFIG = {
         "png_name": "roc_ova_10classes.png",
     },
 
+    # AUC macro (one-vs-rest) para todas as classes (ativar/desativar)
+    "macro_auc": {
+        "enable": True,
+    },
+
     # autenticação
     "auth": {
         "tune_metric": "f1",  # "f1" | "balanced_acc" | "acc"
@@ -1117,6 +1122,32 @@ def main():
         print(f"  âncora idx={int(ai)} | true_class={int(y_eval[int(ai)])}")
         print(f"    cosine: thr={float(thr_cos):.4f} | {mets_a_cos} | cm={cm_a_cos}")
         print(f"    id+conf: thr_conf={float(thr_conf):.4f} | {mets_a_conf} | cm={cm_a_conf}")
+
+    # =========================
+    # AUC macro (one-vs-rest) - todas as classes
+    # =========================
+    macro_auc_cfg = SCRIPT_CONFIG.get("macro_auc", {}) or {}
+    if bool(macro_auc_cfg.get("enable", True)):
+        classes_for_auc = np.unique(y_eval).astype(np.int64, copy=False)
+        aucs = []
+        for c in classes_for_auc.tolist():
+            idx_k = np.where(classes_modelo == int(c))[0]
+            if idx_k.size == 0:
+                continue
+            k = int(idx_k[0])
+            scores = P[:, k]
+            truth = (y_eval == int(c)).astype(np.int8)
+            fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
+            if np.isnan(auc) or fpr.size == 0:
+                continue
+            aucs.append(float(auc))
+
+        if len(aucs) == 0:
+            print("\n[IDENTIFICAÇÃO] Macro AUC (one-vs-rest): não foi possível calcular (sem curvas válidas).")
+        else:
+            macro_auc = float(np.mean(aucs))
+            print("\n[IDENTIFICAÇÃO] Macro AUC (one-vs-rest) entre todas as classes (thresholds variados):")
+            print(f"  macro_auc={macro_auc:.6f} | n_classes={len(aucs)} | min={min(aucs):.6f} | max={max(aucs):.6f}")
 
     # INTERATIVO
     if bool(SCRIPT_CONFIG["enable_interactive_queries"]):
