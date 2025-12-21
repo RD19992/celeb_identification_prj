@@ -574,6 +574,7 @@ def main():
     X_final = X_train_feat[idx_final]
     y_final = y_train[idx_final]
     classes_final = np.unique(y_final).astype(np.int64)
+    relatorio_top_bottom_classes(y_final, top_n=10, bottom_n=10, titulo="Distribuição no y_final (final_frac)")
 
     print(f"[Etapa 7/7] Final sample: X={X_final.shape} | classes={len(classes_final)}")
 
@@ -678,8 +679,6 @@ def relatorio_top_frac_classes(y_base, frac_top_classes=0.20, top_n=10, bottom_n
     classes2, counts2 = np.unique(y_sub, return_counts=True)
     ordem2 = np.argsort(-counts2)
     _print_top_bottom_from_counts(classes2[ordem2], counts2[ordem2], top_n, bottom_n, titulo=titulo)
-
-relatorio_top_bottom_classes(y_final, top_n=10, bottom_n=10, titulo="Distribuição no y_final (final_frac)")
 
 if __name__ == "__main__":
     main()
