@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-CELEBA HOG -> Regressão Logísitca Multinomial (Elastic Net + Armijo)
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
 
-DICA DE PERFORMANCE:
-  - Se você tiver muitas classes (ex: 2036) e k_folds=5, "min 5 por classe" já força >= 10180 amostras no CV.
-    Isso é independente de cv_frac. Para CV mais barato:
-      * reduza frac_classes (prototipagem), OU
-      * defina CONFIG["cv_max_classes"] (CV em subconjunto de classes).
+Código de treinamento de modelo a partir de arquivo extraído de processo HOG
+Treina o Modelo, avalia e salva resultados
+Regressão Logística (Softmax) Multinomial
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from sklearn.metrics import confusion_matrix
 
 
 # ============================================================
-# CONFIG
+# CONFIGURAÇÃO DE PARÂMETROS DE EXECUÇÃO E MODELAGEM
 # ============================================================
 
 CONFIG = {
@@ -39,13 +39,13 @@ CONFIG = {
     "k_folds": 5,
     "cv_frac": 0.10,
     "cv_min_por_classe": None,    # se None -> usa k_folds
-    "cv_max_classes": None,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
+    "cv_max_classes": None,       # opcional: limita nº de classes usadas no CV (parâmetro que usamos para acelerar treinamento)
 
     # treino final
     "final_frac": 1.00,
     "final_min_por_classe": 1,
 
-    # treinamento (separados)
+    # treinamento (épocas para CV e treino final)
     "epochs_cv": 20,
     "epochs_final": 150,
 
@@ -53,7 +53,7 @@ CONFIG = {
     "batch_size_cv": 1024,
     "batch_size_final": 2048,
 
-    # Armijo (por época, usando probe batch)
+    # Armijo (parâmetros de configuração por época, usando probe batch)
     "armijo_alpha0": 2.0,
     "armijo_growth": 1.25,
     "armijo_beta": 0.5,
@@ -62,10 +62,10 @@ CONFIG = {
     "armijo_alpha_min": 1e-6,
     "armijo_probe_batch": 2048,
 
-    # padronização
+    # Padronização para saída do HOG (para estabildiade numérica)
     "eps_std": 1e-6,
 
-    # elastic net grid
+    # Grig para busca de elastic net (usamos para regularização dado tendência muito forte a overfit no treino)
     "grid_l1": [0.0, 1e-4, 3e-4, 1e-3],
     "grid_l2": [0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1],
     "max_combos_cv": 16,
@@ -79,10 +79,10 @@ CONFIG = {
     "top_k_confusao": 10,
 
     # ============================================================
-    # EARLY STOPPING (NOVO) - CONFIGS SEPARADOS PARA CV E FINAL
+    # EARLY STOPPING ÉPOCAS - CONFIGS SEPARADOS PARA CV E FINAL
     # ============================================================
 
-    # CV early stopping (aplicado dentro de cada fold)
+    # CV early stopping (dentro de cada fold)
     "earlystop_cv_enable": True,
     "earlystop_cv_metric": "val_acc",   # "val_acc" ou "val_loss"
     "earlystop_cv_warmup": 3,           # nº de épocas mínimas antes de começar a contar paciência
@@ -91,7 +91,7 @@ CONFIG = {
     "earlystop_cv_restore_best": True,  # restaura W/b do melhor epoch
     "earlystop_cv_val_max": None,       # opcional: subsample fixo do val para monitoramento (int ou None)
 
-    # Final early stopping (monitorando um subconjunto do treino final)
+    # Final early stopping
     "earlystop_final_enable": True,
     "earlystop_final_metric": "val_acc",  # "val_acc" ou "val_loss"
     "earlystop_final_warmup": 10,
@@ -105,7 +105,7 @@ CONFIG = {
 
 
 # ============================================================
-# IO / dataset
+# CARGA DOS DADOS HOG
 # ============================================================
 
 def carregar_dataset(path: str):
@@ -142,7 +142,7 @@ def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.nda
 
 
 # ============================================================
-# Padronização
+# PADRONIZAÇÃO DA SAÍDA DO HOG (ESTABILIDADE)
 # ============================================================
 
 def fit_standardizer(X: np.ndarray, eps: float = 1e-6):
@@ -159,7 +159,7 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
 
 
 # ============================================================
-# Amostragem estratificada com mínimo por classe (FIX frac=1.0)
+# Amostragem estratificada com mínimo por classe
 # ============================================================
 
 def amostrar_com_min_por_classe(y: np.ndarray, frac: float, seed: int, min_por_classe: int):
@@ -210,7 +210,7 @@ def amostrar_com_min_por_classe(y: np.ndarray, frac: float, seed: int, min_por_c
     if add <= 0:
         return np.sort(idx_keep), np.sort(classes_ok)
 
-    # FIX: se add cobre tudo, pega tudo sem StratifiedShuffleSplit (evita train_size==n_samples)
+    # se add cobre tudo, pega tudo sem StratifiedShuffleSplit (evita train_size==n_samples)
     if add >= restantes.size:
         idx_final = np.concatenate([idx_keep, restantes]).astype(np.int64, copy=False)
         return np.sort(np.unique(idx_final)), np.sort(classes_ok)
@@ -226,8 +226,7 @@ def amostrar_com_min_por_classe(y: np.ndarray, frac: float, seed: int, min_por_c
 
 def limitar_classes_para_cv(X: np.ndarray, y: np.ndarray, max_classes: int | None, seed: int):
     """
-    Opcional: reduz nº de classes consideradas no CV (acelera), mantendo estratificação.
-    Retorna X', y' filtrados.
+    Esta é função que implementa o limite de classes para CV, que usamos para deixar o CV mais rápido
     """
     if max_classes is None:
         return X, y
@@ -243,7 +242,7 @@ def limitar_classes_para_cv(X: np.ndarray, y: np.ndarray, max_classes: int | Non
 
 
 # ============================================================
-# Softmax / encode de rótulos
+# Utilitários: Softmax e encode de rótulos
 # ============================================================
 
 def stable_softmax(Z: np.ndarray):
@@ -264,7 +263,7 @@ def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
 
 
 # ============================================================
-# Objective / grad (CE + L2) e proximal L1
+# Definição da Perda: gradiente (Cross Entropy + L2 + L1)
 # ============================================================
 
 def data_loss_ce(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray):
@@ -291,8 +290,8 @@ def objective_total(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarr
 
 def batch_grad_ce_l2(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray, l2: float, m_total: int):
     """
-    grad do termo suave:
-      CE (média do batch) + (l2/(2*m_total))*||W||^2
+    gradiente:
+      Cross Entropy (média do batch) + (l2/(2*m_total))*||W||^2
     """
     B = int(X.shape[0])
     Z = X @ W + b
@@ -348,7 +347,7 @@ def armijo_alpha_epoch(
 
 
 # ============================================================
-# Treino SGD + proximal L1 (elastic net) + EARLY STOPPING (NOVO)
+# Treino SGD + proximal L1 (elastic net) + EARLY STOPPING
 # ============================================================
 
 def treinar_softmax_elasticnet_sgd(
@@ -362,7 +361,7 @@ def treinar_softmax_elasticnet_sgd(
     seed: int,
     use_armijo: bool = True,
 
-    # --- NOVO: validação/monitor + early stopping (opcional) ---
+    # --- validação/monitor + early stopping ---
     X_val: np.ndarray | None = None,
     y_val: np.ndarray | None = None,
     earlystop_enable: bool = False,
@@ -401,7 +400,7 @@ def treinar_softmax_elasticnet_sgd(
     if probe <= 0:
         probe = min(2048, m_total)
 
-    # --- prepara val/monitor (se fornecido) ---
+    # --- prepara val/monitor  ---
     use_val = (X_val is not None) and (y_val is not None)
     if use_val:
         X_val = np.ascontiguousarray(np.asarray(X_val).astype(np.float32, copy=False))
@@ -553,7 +552,7 @@ def treinar_softmax_elasticnet_sgd(
         "armijo_bt_max": int(np.max(backtracks)) if backtracks else None,
         "loss_hist_sub": loss_hist,
 
-        # --- NOVO: early stop stats ---
+        # --- early stop stats ---
         "early_stop_enabled": bool(earlystop_enable),
         "early_stop_metric": earlystop_metric if earlystop_enable else None,
         "early_stop_best_metric": best_metric if earlystop_enable else None,
@@ -610,7 +609,7 @@ def matriz_confusao_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
 
 
 # ============================================================
-# CV: combos L1/L2 limitados (16 combos)
+# CV: combos L1/L2
 # ============================================================
 
 def montar_combos_l1_l2(grid_l1, grid_l2, max_combos: int, strategy: str, seed: int):
@@ -698,7 +697,7 @@ def escolher_melhores_lambdas_por_cv(
                 seed=int(seed) + 1000*fold + 7,
                 use_armijo=True,
 
-                # --- NOVO: early stopping no CV (por fold) ---
+                # --- early stopping no CV (por fold) ---
                 X_val=Xva,
                 y_val=yva,
                 earlystop_enable=bool(CONFIG["earlystop_cv_enable"]),
@@ -782,7 +781,7 @@ def main():
     k = int(CONFIG["k_folds"])
     min_cv = int(CONFIG["cv_min_por_classe"] if CONFIG["cv_min_por_classe"] is not None else k)
 
-    # opcional: limita classes para CV (acelera)
+    # opcional: limita classes para CV (para deixar mais rápido)
     X_train_cv_src, y_train_cv_src = limitar_classes_para_cv(X_train_feat, y_train, CONFIG["cv_max_classes"], seed=int(CONFIG["seed_split"]))
 
     idx_cv, _ = amostrar_com_min_por_classe(
@@ -803,7 +802,7 @@ def main():
         print(f"[Aviso] cv_frac implica alvo~{target}, mas mínimo por classe exige >= {min_needed}. "
               f"O CV vai usar pelo menos {min_needed} amostras. Para acelerar: reduza frac_classes ou use cv_max_classes.")
 
-    # 6) CV grid-search (8 combos)
+    # 6) CV grid-search
     print(f"\n[Etapa 6] CV grid-search | epochs_cv={CONFIG['epochs_cv']} batch_size_cv={CONFIG['batch_size_cv']}")
     (best_l1, best_l2), best_acc, alpha_med = escolher_melhores_lambdas_por_cv(
         X_cv=X_cv,
@@ -835,7 +834,7 @@ def main():
     print(f"[Etapa 7] Final sample: X={X_final.shape} | classes={len(classes_final)}")
     print(f"[Etapa 7] Test alinhado: X={X_test_final.shape} | classes={len(np.unique(y_test_final))}")
 
-    # --- NOVO: cria monitor subset do treino final (sem remover do treino) ---
+    # --- Cria monitor subset do treino final (sem remover do treino) ---
     X_mon, y_mon = None, None
     if bool(CONFIG["earlystop_final_enable"]):
         n_tr = int(X_final.shape[0])
@@ -863,7 +862,7 @@ def main():
         seed=int(CONFIG["seed_split"]) + 2025,
         use_armijo=True,
 
-        # --- NOVO: early stopping no treino final (monitor subset) ---
+        # --- Early stopping no treino final (monitor subset) ---
         X_val=X_mon,
         y_val=y_mon,
         earlystop_enable=bool(CONFIG["earlystop_final_enable"]),
@@ -894,13 +893,13 @@ def main():
 
 
     # ============================================================
-    # SAVE (modelo + classes + normalização) - ADICIONADO
+    # SALVAR (modelo + classes + normalização)
     # ============================================================
     out_dir = (Path(__file__).resolve().parent
                if "__file__" in globals() else Path.cwd())
     save_path = out_dir / "logreg_pm_model_and_classes.joblib"
 
-    # Salva tudo necessário para usar em scripts separados (inferência / avaliação):
+    # Salva tudo necessário para usar na identificação e autenticação:
     #  - 'modelo' contém pesos (W, b) e metadados (classes, stats)
     #  - 'classes_usadas' = IDs originais das classes no dataset
     #  - 'standardizer' garante mesma padronização (z-score) em inferência
