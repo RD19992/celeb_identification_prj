@@ -104,7 +104,7 @@ CONFIG = {
     # [CORREÇÃO 3] Label smoothing reduz colapso de confiança
     "label_smoothing": 0.05,  # 0.0 desliga
     # [CORREÇÃO 3] Grid L2 maior (principalmente em escala)
-    "grid_l2": [0.0, 1e-2, 1e-1, 1.0],
+    "grid_l2": [0.0, 1e-5, 1.0, 2.0],
 
     # [CORREÇÃO 3] Max-Norm (opcional; ajuda contra explosões e overfit)
     "maxnorm_enabled": True,
@@ -117,8 +117,8 @@ CONFIG = {
     "epochs_cv": 20,
     "epochs_final": 120,
 
-    "batch_size_cv": 256,
-    "batch_size_final": 512,
+    "batch_size_cv": 128,
+    "batch_size_final": 128,
 
     # Gaussian noise (somente no treino; X já é padronizado)
     "gaussian_noise_std": 0.00,  # ex.: 0.01; 0.0 desliga
