@@ -39,7 +39,7 @@ from sklearn.model_selection import train_test_split, StratifiedKFold, Stratifie
 
 CONFIG = {
     # dataset
-    "path_hog_npz": r".\hog_features\hog_128.npz",  # ou 64/96 etc
+    "path_hog_file": r"celeba_hog_128x128_09.joblib",  # <-- está na mesma pasta do script
     "hog_key_X": "X",
     "hog_key_y": "y",
 
@@ -143,22 +143,73 @@ def set_seeds(seed: int):
 # UTIL: Carregar dataset (HOG já pronto)
 # ============================================================
 
-def load_hog_dataset(npz_path: str, key_X: str = "X", key_y: str = "y") -> Tuple[np.ndarray, np.ndarray]:
-    if not os.path.exists(npz_path):
-        raise FileNotFoundError(f"Arquivo não encontrado: {npz_path}")
+def resolve_data_path(path: str) -> str:
+    """Resolve path relativo ao diretório do script (data/data), e também ao CWD."""
+    path = str(path)
 
-    data = np.load(npz_path, allow_pickle=True)
-    X = data[key_X]
-    y = data[key_y]
+    # absoluto
+    if os.path.isabs(path) and os.path.exists(path):
+        return path
+
+    # relativo ao CWD
+    cand = os.path.abspath(path)
+    if os.path.exists(cand):
+        return cand
+
+    # relativo ao arquivo do script
+    base = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.abspath(os.path.join(base, path))
+    if os.path.exists(cand):
+        return cand
+
+    # fallback: tenta 4 níveis acima (útil se você mover o arquivo)
+    cur = base
+    for _ in range(4):
+        cand = os.path.abspath(os.path.join(cur, path))
+        if os.path.exists(cand):
+            return cand
+        cur = os.path.dirname(cur)
+
+    raise FileNotFoundError(
+        f"Arquivo não encontrado: {path}\nCWD: {os.getcwd()}\nScript dir: {base}"
+    )
+
+def load_hog_dataset(path: str, key_X: str = "X", key_y: str = "y"):
+    path = resolve_data_path(path)
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".npz":
+        data = np.load(path, allow_pickle=True)
+        X = data[key_X]
+        y = data[key_y]
+
+    elif ext in (".joblib", ".pkl", ".pickle"):
+        if joblib is None:
+            raise ImportError("joblib não está instalado. Instale com: pip install joblib")
+        obj = joblib.load(path)
+
+        # suporta (X, y) ou dict {"X":..., "y":...}
+        if isinstance(obj, (tuple, list)) and len(obj) >= 2:
+            X, y = obj[0], obj[1]
+        elif isinstance(obj, dict):
+            if key_X not in obj or key_y not in obj:
+                raise KeyError(f"Joblib dict sem chaves '{key_X}' e '{key_y}'. Chaves: {list(obj.keys())[:20]}")
+            X, y = obj[key_X], obj[key_y]
+        else:
+            raise TypeError(f"Formato inesperado dentro do joblib: {type(obj)}")
+
+    else:
+        raise ValueError(f"Extensão não suportada: {ext} (use .joblib/.pkl/.npz)")
+
     X = np.asarray(X)
     y = np.asarray(y).astype(np.int64, copy=False)
 
     if X.ndim != 2:
         raise ValueError(f"X precisa ser 2D (n, d). Encontrado: {X.shape}")
-
     if y.ndim != 1 or y.shape[0] != X.shape[0]:
         raise ValueError(f"y precisa ser 1D com mesmo n de X. X: {X.shape}, y: {y.shape}")
 
+    print(f"[load_hog_dataset] OK: {path} | X={X.shape} | y={y.shape} | classes={len(np.unique(y))}")
     return X, y
 
 
@@ -986,7 +1037,7 @@ def main():
     t0 = time.time()
 
     # 1) carregar HOG
-    X_all, y_all = load_hog_dataset(CONFIG["path_hog_npz"], CONFIG["hog_key_X"], CONFIG["hog_key_y"])
+    X_all, y_all = load_hog_dataset(CONFIG["path_hog_file"], CONFIG["hog_key_X"], CONFIG["hog_key_y"])
     print(f"[Etapa 1] Loaded: X={X_all.shape} | y={y_all.shape} | classes={len(np.unique(y_all))}")
 
     # 1b) filtrar top classes por frequência (20% / etc) -> aqui depende do dataset salvo
