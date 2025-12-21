@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-CELEBA HOG -> MLP (1 hidden layer)
-====================================================
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
 
-Objetivo
---------
-Classificação de identidades (CelebA) usando HOG fixo (não muda) + MLP 1 camada escondida.
-Este script implementa uma versão estável e escalável do seu pipeline, com foco em:
-
+Código de treinamento de modelo a partir de arquivo extraído de processo HOG
+Treina o Modelo, avalia e salva resultados
+Multilayer Perceptron com 1 Hidden Layer
 """
 
 from __future__ import annotations

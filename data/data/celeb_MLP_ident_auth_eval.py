@@ -1,39 +1,12 @@
 # -*- coding: utf-8 -*-
-"""
-MLP PM - Avaliação (Identificação + Autenticação) - SCRIPT NOVO
-==============================================================
+""""
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
 
-O que este script faz (em ordem):
-1) Lê o arquivo salvo pelo treino: "mlp_pm_model_and_classes.joblib" (na MESMA pasta).
-2) Confirma leitura e imprime:
-   - 20 IDs de classes presentes no modelo
-   - exemplos de parâmetros do modelo (shapes, ativações, cosine-softmax, etc.)
-3) Reconstroi o conjunto de avaliação (reproduz passos do treino para obter o TESTE alinhado):
-   - carrega o joblib HOG usado no treino (path vem do config_snapshot salvo no payload)
-   - refaz seleção de classes + split treino/teste (mesmas seeds)
-   - aplica o standardizer salvo (mean/std do treino)
-   - filtra o teste para as classes usadas no modelo
-4) Identificação:
-   - prediz classe para cada amostra do conjunto de avaliação
-   - calcula acurácia
-   - imprime 10 matrizes de confusão one-vs-all para 10 classes aleatórias
-5) Autenticação (mesma pessoa?):
-   - extrai embeddings do MLP (vetor da camada escondida, normalizado)
-   - tuning balanceado de thresholds com F1 / balanced-acc (cosine e prob_dot)
-   - imprime sim_pos vs sim_neg para inspeção rápida
-   - regra principal: verificação por identidade prevista + confiança (min(pmax_i,pmax_j) >= thr_conf)
-   - avalia em pares (full se N pequeno; senão amostra) e imprime métricas + confusão
-6) Interativo (opcional):
-   - consulta por "ID" de amostra para predizer classe
-   - consulta por DOIS IDs para dizer se são da mesma classe (e qual) ou não
-
-Notas IMPORTANTES:
-- "ID" aqui significa o índice da amostra dentro do conjunto de avaliação construído por este script
-  (0..N-1). O script imprime como mapear.
-- Se o seu joblib HOG não contém paths de imagem, a etapa de visualização não consegue mostrar
-  as imagens originais (HOG não guarda pixels). Neste caso, o script salva/mostra apenas índices.
-
-Dependências: numpy, joblib, scikit-learn (apenas train_test_split), matplotlib (opcional para visual).
+Código de avaliação de modelo com tarefas de identificação e autenticação
+Consome parâmetros de modelo treinado
+Multilayer Perceptron com 1 Hidden Layer
 """
 
 from __future__ import annotations

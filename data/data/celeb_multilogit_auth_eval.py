@@ -1,45 +1,13 @@
 
 # -*- coding: utf-8 -*-
 """
-LogReg PM - Avaliação (Identificação + Autenticação) - SCRIPT NOVO
-=================================================================
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
 
-Script análogo ao "MLP Eval", mas para o modelo de Regressão Logística (softmax)
-salvo pelo script de treino: "logreg_pm_model_and_classes.joblib".
-
-O que este script faz (em ordem):
-1) Lê o arquivo salvo pelo treino (na MESMA pasta).
-2) Confirma leitura e imprime:
-   - 20 IDs de classes presentes no modelo
-   - exemplos de parâmetros do modelo (shapes de W/b, hparams, métricas)
-3) Reconstroi o conjunto de avaliação (reproduz passos do treino para obter o TESTE alinhado):
-   - carrega o joblib HOG usado no treino (path vem do config_snapshot salvo no payload)
-   - refaz seleção de classes + split treino/teste (mesmas seeds)
-   - aplica o standardizer salvo (mean/std do treino)
-   - filtra o teste para as classes usadas no modelo
-4) Identificação:
-   - prediz classe para cada amostra do conjunto de avaliação
-   - calcula acurácia
-   - imprime matrizes de confusão one-vs-all para 10 classes aleatórias
-   - plota ROC one-vs-all para as mesmas 10 classes (thresholds variados)
-5) Autenticação (mesma pessoa?):
-   - usa 2 scores: cosine(logits) e prob_dot(softmax)
-   - tuning balanceado de thresholds com F1 / balanced-acc (ou acc)
-   - imprime sim_pos vs sim_neg para inspeção rápida
-   - regra principal: verificação por identidade prevista + confiança (min(pmax_i,pmax_j) >= thr_conf)
-   - avalia em pares (full se N pequeno; senão amostra) e imprime métricas + confusão
-   - para 10 âncoras aleatórias, imprime métricas TP/FP/FN/TN (cosine vs id+conf)
-6) AUC macro (one-vs-rest) para TODAS as classes (opcional via config)
-7) Interativo (opcional):
-   - consulta por "ID" de amostra para predizer classe
-   - consulta por DOIS IDs para dizer se são da mesma classe (e qual) ou não
-
-Notas:
-- "ID" aqui significa o índice da amostra dentro do conjunto de avaliação construído por este script
-  (0..N-1). Não é o nome do arquivo.
-- O joblib HOG geralmente não guarda pixels; este script não tenta resgatar imagens.
-
-Dependências: numpy, joblib, scikit-learn (apenas train_test_split), matplotlib (opcional para ROC).
+Código de avaliação de modelo com tarefas de identificação e autenticação
+Consome parâmetros de modelo treinado
+Regressão Logística (Softmax) Multinomial
 """
 
 from __future__ import annotations
@@ -55,7 +23,7 @@ from sklearn.model_selection import train_test_split
 
 
 # ============================================================
-# CONFIG DO SCRIPT (ajuste aqui)
+# CONFIGURAÇÕES
 # ============================================================
 
 SCRIPT_CONFIG = {
