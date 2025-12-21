@@ -2,7 +2,7 @@
 """
 CELEBA HOG -> Softmax Regression (do zero, GD + Armijo) com CV estratificado.
 
-CORREÇÕES IMPORTANTES NESTA VERSÃO:
+CORREÇÕES IMPORTANTES NESTA VERSÃO (pedido do usuário):
 1) [FIX CV 4 MEMBROS] A amostragem para CV agora GARANTE >= k amostras por classe,
    evitando o warning do StratifiedKFold (classe com 4 membros quando k=5).
    - Antes: amostrava classes até passar do alvo e depois "cortava" (truncate) globalmente,
@@ -595,7 +595,6 @@ def main():
 
     # matriz confusão top-k
     avaliar_teste_top10(y_test=y_test, y_pred_test=y_pred_test, top_k=CONFIG["top_k_confusao"])
-
 
 
 if __name__ == "__main__":
