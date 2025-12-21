@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-CELEBA HOG -> Softmax Regression "from scratch" (Elastic Net + Armijo)
-
-VERSÃO OTIMIZADA PARA VELOCIDADE (refatorada):
-  1) Remove one-hot com loop Python (gargalo). Usa y_idx via np.searchsorted.
-  2) Treino em mini-batches (SGD). Evita softmax gigante de uma vez.
-  3) Armijo é feito 1x por ÉPOCA em um "probe batch" pequeno (continua só usando treino/CV).
-  4) Mantém normalização /m:
-       - grad CE usa média do batch (SGD)
-       - L2 e L1 são normalizados por m_total (tamanho do treino usado no modelo).
-  5) Corrige edge-case que quebrava quando frac=1.0 (train_size == n_samples no StratifiedShuffleSplit).
+CELEBA HOG -> Regressão Logísitca Multinomial (Elastic Net + Armijo)
 
 DICA DE PERFORMANCE:
   - Se você tiver muitas classes (ex: 2036) e k_folds=5, "min 5 por classe" já força >= 10180 amostras no CV.
@@ -48,7 +39,7 @@ CONFIG = {
     "k_folds": 5,
     "cv_frac": 0.10,
     "cv_min_por_classe": None,    # se None -> usa k_folds
-    "cv_max_classes": 600,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
+    "cv_max_classes": None,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
 
     # treino final
     "final_frac": 1.00,
@@ -86,6 +77,30 @@ CONFIG = {
     "loss_subsample_max": 2000,
     "n_exemplos_previsao": 12,
     "top_k_confusao": 10,
+
+    # ============================================================
+    # EARLY STOPPING (NOVO) - CONFIGS SEPARADOS PARA CV E FINAL
+    # ============================================================
+
+    # CV early stopping (aplicado dentro de cada fold)
+    "earlystop_cv_enable": True,
+    "earlystop_cv_metric": "val_acc",   # "val_acc" ou "val_loss"
+    "earlystop_cv_warmup": 3,           # nº de épocas mínimas antes de começar a contar paciência
+    "earlystop_cv_patience": 5,         # nº de épocas sem melhora antes de parar
+    "earlystop_cv_min_delta": 0.0,      # melhora mínima para resetar paciência
+    "earlystop_cv_restore_best": True,  # restaura W/b do melhor epoch
+    "earlystop_cv_val_max": None,       # opcional: subsample fixo do val para monitoramento (int ou None)
+
+    # Final early stopping (monitorando um subconjunto do treino final)
+    "earlystop_final_enable": True,
+    "earlystop_final_metric": "val_acc",  # "val_acc" ou "val_loss"
+    "earlystop_final_warmup": 10,
+    "earlystop_final_patience": 12,
+    "earlystop_final_min_delta": 0.0,
+    "earlystop_final_restore_best": True,
+    "earlystop_final_monitor_frac": 0.10,   # fração do treino final para monitoramento
+    "earlystop_final_monitor_max": 20000,   # teto de tamanho do monitor
+    "earlystop_final_monitor_seed": 4242,   # seed do monitor (fixa o subconjunto)
 }
 
 
@@ -333,7 +348,7 @@ def armijo_alpha_epoch(
 
 
 # ============================================================
-# Treino SGD + proximal L1 (elastic net)
+# Treino SGD + proximal L1 (elastic net) + EARLY STOPPING (NOVO)
 # ============================================================
 
 def treinar_softmax_elasticnet_sgd(
@@ -346,6 +361,17 @@ def treinar_softmax_elasticnet_sgd(
     batch_size: int,
     seed: int,
     use_armijo: bool = True,
+
+    # --- NOVO: validação/monitor + early stopping (opcional) ---
+    X_val: np.ndarray | None = None,
+    y_val: np.ndarray | None = None,
+    earlystop_enable: bool = False,
+    earlystop_metric: str = "val_acc",     # "val_acc" ou "val_loss"
+    earlystop_warmup: int = 0,
+    earlystop_patience: int = 10,
+    earlystop_min_delta: float = 0.0,
+    earlystop_restore_best: bool = True,
+    earlystop_val_max: int | None = None,  # subsample fixo do val para monitoramento (int ou None)
 ):
     rng = np.random.default_rng(int(seed))
     X_train = np.ascontiguousarray(X_train.astype(np.float32, copy=False))
@@ -374,6 +400,60 @@ def treinar_softmax_elasticnet_sgd(
     probe = int(CONFIG["armijo_probe_batch"])
     if probe <= 0:
         probe = min(2048, m_total)
+
+    # --- prepara val/monitor (se fornecido) ---
+    use_val = (X_val is not None) and (y_val is not None)
+    if use_val:
+        X_val = np.ascontiguousarray(np.asarray(X_val).astype(np.float32, copy=False))
+        y_val = np.asarray(y_val).astype(np.int64, copy=False)
+        y_val_idx = codificar_rotulos(y_val, classes_modelo)
+
+        # subsample fixo opcional para monitoramento
+        if earlystop_val_max is not None:
+            vmax = int(earlystop_val_max)
+            if vmax > 0 and X_val.shape[0] > vmax:
+                rng_val = np.random.default_rng(int(seed) + 7777)
+                sel = rng_val.choice(X_val.shape[0], size=vmax, replace=False)
+                X_val = X_val[sel]
+                y_val = y_val[sel]
+                y_val_idx = y_val_idx[sel]
+
+    # --- estado do early stop ---
+    earlystop_enable = bool(earlystop_enable) and use_val
+    earlystop_metric = str(earlystop_metric).strip().lower()
+    earlystop_warmup = int(max(0, earlystop_warmup))
+    earlystop_patience = int(max(1, earlystop_patience))
+    earlystop_min_delta = float(earlystop_min_delta)
+    earlystop_restore_best = bool(earlystop_restore_best)
+
+    best_metric = None
+    best_epoch = None
+    best_W = None
+    best_b = None
+    wait = 0
+    stopped_early = False
+
+    def _compute_val_metric():
+        # retorna (metric_name, metric_value)
+        if not use_val:
+            return None, None
+
+        if earlystop_metric == "val_loss":
+            # loss de dados (CE) no val/monitor (sem regularização)
+            v = data_loss_ce(W, b, X_val, y_val_idx)
+            return "val_loss", float(v)
+
+        # default: val_acc
+        yhat_val, _ = predict_labels(X_val, W, b, classes_modelo)
+        v = float(np.mean(yhat_val == y_val))
+        return "val_acc", float(v)
+
+    def _is_improvement(curr, best):
+        if best is None:
+            return True
+        if earlystop_metric == "val_loss":
+            return (best - curr) > earlystop_min_delta
+        return (curr - best) > earlystop_min_delta
 
     for ep in range(int(epochs)):
         # decide alpha da época via Armijo em probe batch
@@ -435,7 +515,33 @@ def treinar_softmax_elasticnet_sgd(
         sub = rng.choice(m_total, size=sub_n, replace=False)
         loss_ep = objective_total(W, b, X_train[sub], y_idx[sub], l1=float(l1), l2=float(l2), m_total=m_total)
         loss_hist.append(float(loss_ep))
-        print(f"[SGD] ep={ep+1:03d}/{epochs} alpha={alpha_ep:.3e} loss_sub~={loss_ep:.6f}")
+
+        # --- early stopping: avalia val/monitor ao fim da época ---
+        if earlystop_enable:
+            mname, mval = _compute_val_metric()
+            print(f"[SGD] ep={ep+1:03d}/{epochs} alpha={alpha_ep:.3e} loss_sub~={loss_ep:.6f} | {mname}={mval:.6f}")
+            if _is_improvement(mval, best_metric):
+                best_metric = float(mval)
+                best_epoch = int(ep + 1)
+                wait = 0
+                if earlystop_restore_best:
+                    best_W = W.copy()
+                    best_b = b.copy()
+            else:
+                # só conta paciência após warmup
+                if (ep + 1) >= earlystop_warmup:
+                    wait += 1
+                    if wait >= earlystop_patience:
+                        stopped_early = True
+                        print(f"[EARLY STOP] stop em ep={ep+1} (best_ep={best_epoch}, best_{mname}={best_metric:.6f})")
+                        break
+        else:
+            print(f"[SGD] ep={ep+1:03d}/{epochs} alpha={alpha_ep:.3e} loss_sub~={loss_ep:.6f}")
+
+    # restaura melhor estado (se habilitado e coletado)
+    if earlystop_enable and earlystop_restore_best and best_W is not None and best_b is not None:
+        W = best_W
+        b = best_b
 
     stats = {
         "alpha_epoch": alphas,
@@ -446,6 +552,15 @@ def treinar_softmax_elasticnet_sgd(
         "armijo_bt_mean": float(np.mean(backtracks)) if backtracks else None,
         "armijo_bt_max": int(np.max(backtracks)) if backtracks else None,
         "loss_hist_sub": loss_hist,
+
+        # --- NOVO: early stop stats ---
+        "early_stop_enabled": bool(earlystop_enable),
+        "early_stop_metric": earlystop_metric if earlystop_enable else None,
+        "early_stop_best_metric": best_metric if earlystop_enable else None,
+        "early_stop_best_epoch": best_epoch if earlystop_enable else None,
+        "early_stop_wait": int(wait) if earlystop_enable else None,
+        "early_stop_stopped": bool(stopped_early) if earlystop_enable else False,
+        "early_stop_epochs_ran": int(min(len(loss_hist), int(epochs))),
     }
     return {"W": W, "b": b, "classes": classes_modelo, "stats": stats}
 
@@ -582,6 +697,17 @@ def escolher_melhores_lambdas_por_cv(
                 batch_size=int(batch_size_cv),
                 seed=int(seed) + 1000*fold + 7,
                 use_armijo=True,
+
+                # --- NOVO: early stopping no CV (por fold) ---
+                X_val=Xva,
+                y_val=yva,
+                earlystop_enable=bool(CONFIG["earlystop_cv_enable"]),
+                earlystop_metric=str(CONFIG["earlystop_cv_metric"]),
+                earlystop_warmup=int(CONFIG["earlystop_cv_warmup"]),
+                earlystop_patience=int(CONFIG["earlystop_cv_patience"]),
+                earlystop_min_delta=float(CONFIG["earlystop_cv_min_delta"]),
+                earlystop_restore_best=bool(CONFIG["earlystop_cv_restore_best"]),
+                earlystop_val_max=CONFIG["earlystop_cv_val_max"],
             )
             yhat, _ = predict_labels(Xva, modelo["W"], modelo["b"], modelo["classes"])
             acc = float(np.mean(yhat == yva))
@@ -709,6 +835,23 @@ def main():
     print(f"[Etapa 7] Final sample: X={X_final.shape} | classes={len(classes_final)}")
     print(f"[Etapa 7] Test alinhado: X={X_test_final.shape} | classes={len(np.unique(y_test_final))}")
 
+    # --- NOVO: cria monitor subset do treino final (sem remover do treino) ---
+    X_mon, y_mon = None, None
+    if bool(CONFIG["earlystop_final_enable"]):
+        n_tr = int(X_final.shape[0])
+        frac = float(CONFIG["earlystop_final_monitor_frac"])
+        maxn = int(CONFIG["earlystop_final_monitor_max"])
+        n_mon = int(np.ceil(frac * n_tr))
+        n_mon = max(1, min(n_mon, maxn))
+        if n_mon >= n_tr:
+            X_mon, y_mon = X_final, y_final
+        else:
+            y_tmp = y_final
+            sss = StratifiedShuffleSplit(n_splits=1, train_size=n_mon, random_state=int(CONFIG["earlystop_final_monitor_seed"]))
+            mon_rel, _ = next(sss.split(np.zeros(n_tr), y_tmp))
+            X_mon, y_mon = X_final[mon_rel], y_final[mon_rel]
+        print(f"[EARLY STOP FINAL] Monitor: X={X_mon.shape} | classes={len(np.unique(y_mon))}")
+
     modelo = treinar_softmax_elasticnet_sgd(
         X_train=X_final,
         y_train=y_final,
@@ -719,10 +862,26 @@ def main():
         batch_size=int(CONFIG["batch_size_final"]),
         seed=int(CONFIG["seed_split"]) + 2025,
         use_armijo=True,
+
+        # --- NOVO: early stopping no treino final (monitor subset) ---
+        X_val=X_mon,
+        y_val=y_mon,
+        earlystop_enable=bool(CONFIG["earlystop_final_enable"]),
+        earlystop_metric=str(CONFIG["earlystop_final_metric"]),
+        earlystop_warmup=int(CONFIG["earlystop_final_warmup"]),
+        earlystop_patience=int(CONFIG["earlystop_final_patience"]),
+        earlystop_min_delta=float(CONFIG["earlystop_final_min_delta"]),
+        earlystop_restore_best=bool(CONFIG["earlystop_final_restore_best"]),
+        earlystop_val_max=None,  # monitor já é controlado pelo monitor_frac/max
     )
 
     st = modelo["stats"]
     print("\n[Armijo FINAL] alpha_median=", st["alpha_median"], " bt_mean=", st["armijo_bt_mean"], " bt_max=", st["armijo_bt_max"])
+    if st.get("early_stop_enabled"):
+        print("[EARLY STOP FINAL] best_epoch=", st.get("early_stop_best_epoch"),
+              " best_metric=", st.get("early_stop_best_metric"),
+              " stopped=", st.get("early_stop_stopped"),
+              " epochs_ran=", st.get("early_stop_epochs_ran"))
 
     yhat_tr, _ = predict_labels(X_final, modelo["W"], modelo["b"], modelo["classes"])
     yhat_te, P_te = predict_labels(X_test_final, modelo["W"], modelo["b"], modelo["classes"])
