@@ -19,12 +19,11 @@ O que este script faz (em ordem):
    - imprime 10 matrizes de confusão one-vs-all para 10 classes aleatórias
 5) Autenticação (mesma pessoa?):
    - extrai embeddings do MLP (vetor da camada escondida, normalizado)
-   - escolhe automaticamente um threshold de similaridade por amostragem (max acurácia)
-   - avalia acurácia de autenticação em pares (todas as combinações se for pequeno; senão amostra)
-   - para 10 âncoras aleatórias, imprime TP/FP/FN/TN vs todas as demais amostras
-6) Visualização:
-   - tenta carregar e exibir/salvar as 10 imagens âncora (se o joblib tiver paths de imagem acessíveis)
-7) Interativo (opcional):
+   - tuning balanceado de thresholds com F1 / balanced-acc (cosine e prob_dot)
+   - imprime sim_pos vs sim_neg para inspeção rápida
+   - regra principal: verificação por identidade prevista + confiança (min(pmax_i,pmax_j) >= thr_conf)
+   - avalia em pares (full se N pequeno; senão amostra) e imprime métricas + confusão
+6) Interativo (opcional):
    - consulta por "ID" de amostra para predizer classe
    - consulta por DOIS IDs para dizer se são da mesma classe (e qual) ou não
 
@@ -48,7 +47,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from sklearn.model_selection import train_test_split
 
-
 # ============================================================
 # CONFIG DO SCRIPT (ajuste aqui)
 # ============================================================
@@ -66,26 +64,31 @@ SCRIPT_CONFIG = {
     # identificação
     "one_vs_all_n_classes": 10,
 
+    "roc": {
+        "enable": True,
+        "save_png": True,
+        "show_plots": True,
+        "png_name": "roc_ova_10classes.png",
+    },
+
     # autenticação
     "auth": {
+        "tune_metric": "f1",  # "f1" | "balanced_acc" | "acc"
+
         # tuning do threshold (amostragem):
-        "pos_pairs_per_class": 50,     # tenta gerar até isso por classe (se houver amostras)
-        "neg_pairs_total": 20000,      # negativos totais para tuning
-        "threshold_grid_q": 401,       # quantis para varrer threshold (>=101 recomendado)
+        "pos_pairs_per_class": 50,  # tenta gerar até isso por classe (se houver amostras)
+        "neg_pairs_total": 20000,  # negativos totais para tuning
+        "threshold_grid_q": 401,  # quantis para varrer threshold (>=101 recomendado)
 
         # avaliação em pares:
         # modo "auto": se N for pequeno faz "full"; caso contrário faz "sample"
-        "eval_mode": "auto",           # "auto" | "full" | "sample"
-        "full_if_n_leq": 2500,         # se N <= isso, tenta full (O(N^2))
+        "eval_mode": "auto",  # "auto" | "full" | "sample"
+        "full_if_n_leq": 2500,  # se N <= isso, tenta full (O(N^2))
         "sample_pairs_if_large": 300000,  # #pares amostrados se N grande
 
         # matrizes por âncora
         "n_anchor_images": 10,
     },
-
-    # visualização
-    "save_anchor_grid_png": True,
-    "anchor_grid_png_name": "auth_anchors_grid.png",
 
     # modo interativo (input)
     "enable_interactive_queries": False,
@@ -193,13 +196,13 @@ def _col_norm_forward(W: np.ndarray, eps: float):
 
 
 def output_logits_forward(
-    A1: np.ndarray,
-    W2: np.ndarray,
-    b2: np.ndarray,
-    act_output: str,
-    scale: float,
-    eps: float,
-    use_bias: bool,
+        A1: np.ndarray,
+        W2: np.ndarray,
+        b2: np.ndarray,
+        act_output: str,
+        scale: float,
+        eps: float,
+        use_bias: bool,
 ):
     act_output = str(act_output).lower().strip()
 
@@ -247,9 +250,9 @@ def layernorm_forward(Z: np.ndarray, gamma: np.ndarray, beta: np.ndarray, eps: f
 
 
 def mlp_forward_inference(
-    X: np.ndarray,
-    modelo: Dict[str, Any],
-    inference_params: Dict[str, Any],
+        X: np.ndarray,
+        modelo: Dict[str, Any],
+        inference_params: Dict[str, Any],
 ):
     """
     Retorna (P, A1_pre) onde:
@@ -258,8 +261,10 @@ def mlp_forward_inference(
     """
     X = X.astype(np.float32, copy=False)
 
-    W1 = modelo["W1"]; b1 = modelo["b1"]
-    W2 = modelo["W2"]; b2 = modelo["b2"]
+    W1 = modelo["W1"];
+    b1 = modelo["b1"]
+    W2 = modelo["W2"];
+    b2 = modelo["b2"]
     act_hidden = modelo.get("act_hidden", inference_params.get("act_hidden", "relu"))
     act_output = modelo.get("act_output", inference_params.get("act_output", "cosine_softmax"))
 
@@ -400,61 +405,328 @@ def _sample_negative_pairs(y: np.ndarray, rng: np.random.Generator, total: int):
     return pairs
 
 
-def tune_threshold_cosine(emb: np.ndarray, y: np.ndarray, rng: np.random.Generator,
-                          pos_pairs_per_class: int, neg_pairs_total: int, q_grid: int):
-    """
-    Escolhe threshold que maximiza acurácia em um conjunto amostrado de pares.
-    Retorna (best_thr, stats_dict).
-    """
-    emb = np.asarray(emb, dtype=np.float32)
-    y = np.asarray(y, dtype=np.int64)
+def _binary_counts_from_pred_truth(pred: np.ndarray, truth: np.ndarray) -> Dict[str, int]:
+    pred = np.asarray(pred).astype(bool)
+    truth = np.asarray(truth).astype(bool)
+    TP = int(np.sum(pred & truth))
+    TN = int(np.sum((~pred) & (~truth)))
+    FP = int(np.sum(pred & (~truth)))
+    FN = int(np.sum((~pred) & truth))
+    return {"TP": TP, "TN": TN, "FP": FP, "FN": FN}
 
+
+def _binary_metrics_from_counts(cm: Dict[str, int]) -> Dict[str, float]:
+    TP = float(cm["TP"]);
+    TN = float(cm["TN"]);
+    FP = float(cm["FP"]);
+    FN = float(cm["FN"])
+    denom = TP + TN + FP + FN
+    acc = (TP + TN) / denom if denom > 0 else 0.0
+    prec = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+    rec = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    tpr = rec
+    tnr = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    bal_acc = 0.5 * (tpr + tnr)
+    return {"acc": float(acc), "precision": float(prec), "recall": float(rec), "f1": float(f1),
+            "balanced_acc": float(bal_acc)}
+
+
+def _score_summary(scores: np.ndarray) -> Dict[str, float]:
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    if scores.size == 0:
+        return {"n": 0}
+    qs = np.quantile(scores, [0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]).astype(np.float32)
+    return {
+        "n": int(scores.size),
+        "min": float(qs[0]),
+        "q05": float(qs[1]),
+        "q25": float(qs[2]),
+        "median": float(qs[3]),
+        "q75": float(qs[4]),
+        "q95": float(qs[5]),
+        "max": float(qs[6]),
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+    }
+
+
+def build_tuning_pairs(y: np.ndarray, rng: np.random.Generator,
+                       pos_pairs_per_class: int, neg_pairs_total: int,
+                       balanced: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Gera pares (i,j) com rótulo binário de "mesma classe?" (tt=1) ou "classes diferentes?" (tt=0).
+    Tuning balanceado: limita #negativos ~ #positivos para evitar "acurácia alta só chutando negativo".
+    """
+    y = np.asarray(y, dtype=np.int64)
     pos_pairs = _sample_positive_pairs_per_class(y, rng, per_class=int(pos_pairs_per_class))
-    neg_pairs = _sample_negative_pairs(y, rng, total=int(neg_pairs_total))
+    n_pos = int(len(pos_pairs))
+    n_neg_target = int(neg_pairs_total)
+    if balanced and n_pos > 0:
+        n_neg_target = min(int(neg_pairs_total), n_pos)
+    neg_pairs = _sample_negative_pairs(y, rng, total=int(n_neg_target))
     pairs = pos_pairs + neg_pairs
     if len(pairs) == 0:
-        return 0.5, {"note": "sem pares para tuning; usando thr=0.5", "pairs_used": 0}
+        ii = np.zeros((0,), dtype=np.int64)
+        jj = np.zeros((0,), dtype=np.int64)
+        tt = np.zeros((0,), dtype=np.int8)
+        info = {"pairs_used": 0, "pos_pairs": 0, "neg_pairs": 0}
+        return ii, jj, tt, info
 
     ii = np.array([p[0] for p in pairs], dtype=np.int64)
     jj = np.array([p[1] for p in pairs], dtype=np.int64)
     tt = np.array([p[2] for p in pairs], dtype=np.int8)
+    info = {"pairs_used": int(len(pairs)), "pos_pairs": int(len(pos_pairs)), "neg_pairs": int(len(neg_pairs))}
+    return ii, jj, tt, info
 
-    sims = np.sum(emb[ii] * emb[jj], axis=1).astype(np.float32, copy=False)
+
+def tune_threshold_scores(scores: np.ndarray, truth: np.ndarray, q_grid: int,
+                          metric: str = "f1") -> Tuple[float, Dict[str, Any]]:
+    """
+    Escolhe threshold maximizando F1 ou balanced-acc (ou acc).
+    - scores: valores contínuos (maior = mais provável ser a mesma classe)
+    - truth: 1 (mesma classe) / 0 (diferente)
+    """
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    truth = np.asarray(truth, dtype=np.int8).ravel()
+    if scores.size == 0:
+        return 0.5, {"note": "sem scores para tuning; usando thr=0.5"}
 
     q_grid = int(max(21, q_grid))
     qs = np.linspace(0.0, 1.0, q_grid, dtype=np.float32)
-    thrs = np.quantile(sims, qs)
-    thrs = np.unique(thrs)
-
+    thrs = np.unique(np.quantile(scores, qs))
     best_thr = float(thrs[0])
-    best_acc = -1.0
+    best_val = -1.0
     best_cm = None
+    best_metrics = None
+
+    metric = (metric or "f1").strip().lower()
+    if metric not in ("f1", "balanced_acc", "acc"):
+        metric = "f1"
 
     for thr in thrs:
-        pred = (sims >= thr).astype(np.int8)
-        TP = int(np.sum((pred == 1) & (tt == 1)))
-        TN = int(np.sum((pred == 0) & (tt == 0)))
-        FP = int(np.sum((pred == 1) & (tt == 0)))
-        FN = int(np.sum((pred == 0) & (tt == 1)))
-        denom = TP + TN + FP + FN
-        acc = (TP + TN) / denom if denom > 0 else 0.0
-        if acc > best_acc:
-            best_acc = acc
+        pred = scores >= float(thr)
+        cm = _binary_counts_from_pred_truth(pred, truth == 1)
+        mets = _binary_metrics_from_counts(cm)
+        val = mets["f1"] if metric == "f1" else (mets["balanced_acc"] if metric == "balanced_acc" else mets["acc"])
+        if val > best_val:
+            best_val = float(val)
             best_thr = float(thr)
-            best_cm = {"TP": TP, "TN": TN, "FP": FP, "FN": FN}
+            best_cm = cm
+            best_metrics = mets
 
     stats = {
-        "pairs_used": int(len(pairs)),
-        "pos_pairs": int(len(pos_pairs)),
-        "neg_pairs": int(len(neg_pairs)),
-        "best_acc_on_tuning_pairs": float(best_acc),
-        "best_cm_on_tuning_pairs": best_cm,
+        "metric_optimized": metric,
+        "best_metric_value": float(best_val),
+        "best_thr": float(best_thr),
+        "best_cm": best_cm,
+        "best_metrics": best_metrics,
         "thr_candidates": int(thrs.size),
-        "sim_min": float(np.min(sims)),
-        "sim_max": float(np.max(sims)),
-        "sim_mean": float(np.mean(sims)),
+        "scores_summary": _score_summary(scores),
+        "pos_scores_summary": _score_summary(scores[truth == 1]),
+        "neg_scores_summary": _score_summary(scores[truth == 0]),
     }
     return best_thr, stats
+
+
+def tune_threshold_identity_confidence(y_pred: np.ndarray, pmax: np.ndarray,
+                                       ii: np.ndarray, jj: np.ndarray, truth: np.ndarray,
+                                       q_grid: int, metric: str = "f1") -> Tuple[float, Dict[str, Any]]:
+    """
+    Regra de verificação baseada em identidade prevista e confiança:
+      same = (y_pred[i] == y_pred[j]) AND (min(pmax_i, pmax_j) >= thr_conf)
+
+    Faz tuning do thr_conf (balanceado via truth fornecido).
+    """
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    pmax = np.asarray(pmax, dtype=np.float32)
+    ii = np.asarray(ii, dtype=np.int64)
+    jj = np.asarray(jj, dtype=np.int64)
+    truth = np.asarray(truth, dtype=np.int8).ravel()
+    if ii.size == 0:
+        return 0.5, {"note": "sem pares para tuning; usando thr=0.5"}
+
+    same_id = (y_pred[ii] == y_pred[jj])
+    conf = np.minimum(pmax[ii], pmax[jj]).astype(np.float32, copy=False)
+
+    # thresholds em [0,1] por quantis do conf (mas inclui 0 e 1)
+    q_grid = int(max(21, q_grid))
+    qs = np.linspace(0.0, 1.0, q_grid, dtype=np.float32)
+    thrs = np.unique(np.quantile(conf, qs))
+    best_thr = float(thrs[0])
+    best_val = -1.0
+    best_cm = None
+    best_metrics = None
+
+    metric = (metric or "f1").strip().lower()
+    if metric not in ("f1", "balanced_acc", "acc"):
+        metric = "f1"
+
+    for thr in thrs:
+        pred = same_id & (conf >= float(thr))
+        cm = _binary_counts_from_pred_truth(pred, truth == 1)
+        mets = _binary_metrics_from_counts(cm)
+        val = mets["f1"] if metric == "f1" else (mets["balanced_acc"] if metric == "balanced_acc" else mets["acc"])
+        if val > best_val:
+            best_val = float(val)
+            best_thr = float(thr)
+            best_cm = cm
+            best_metrics = mets
+
+    stats = {
+        "metric_optimized": metric,
+        "best_metric_value": float(best_val),
+        "best_thr": float(best_thr),
+        "best_cm": best_cm,
+        "best_metrics": best_metrics,
+        "thr_candidates": int(thrs.size),
+        "conf_summary_all": _score_summary(conf),
+        "conf_summary_sameid": _score_summary(conf[same_id]),
+        "conf_summary_diffid": _score_summary(conf[~same_id]),
+    }
+    return best_thr, stats
+
+
+def eval_auth_pairs_full_prob(P: np.ndarray, y: np.ndarray, thr: float) -> Dict[str, Any]:
+    """Avalia todas as combinações com score = dot(P_i, P_j)."""
+    P = np.asarray(P, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+    n = int(y.size)
+    if n < 2:
+        return {"note": "N<2", "pairs": 0, "acc": 0.0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+
+    TP = TN = FP = FN = 0
+    for i in range(n - 1):
+        sims = P[i + 1:] @ P[i]  # (n-i-1,)
+        pred = sims >= float(thr)
+        truth = (y[i + 1:] == y[i])
+        TP += int(np.sum(pred & truth))
+        TN += int(np.sum((~pred) & (~truth)))
+        FP += int(np.sum(pred & (~truth)))
+        FN += int(np.sum((~pred) & truth))
+
+    pairs = n * (n - 1) // 2
+    acc = (TP + TN) / pairs if pairs > 0 else 0.0
+    mets = _binary_metrics_from_counts({"TP": TP, "TN": TN, "FP": FP, "FN": FN})
+    return {"mode": "full", "pairs": int(pairs), "acc": float(acc), "TP": TP, "TN": TN, "FP": FP, "FN": FN,
+            **{f"m_{k}": v for k, v in mets.items()}}
+
+
+def eval_auth_pairs_full_identity_confidence(y_pred: np.ndarray, pmax: np.ndarray, y_true: np.ndarray,
+                                             thr_conf: float) -> Dict[str, Any]:
+    """Avalia todas as combinações com regra: same_id_pred & min_conf >= thr_conf."""
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    pmax = np.asarray(pmax, dtype=np.float32)
+    y_true = np.asarray(y_true, dtype=np.int64)
+    n = int(y_true.size)
+    if n < 2:
+        return {"note": "N<2", "pairs": 0, "acc": 0.0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+
+    TP = TN = FP = FN = 0
+    for i in range(n - 1):
+        same_id = (y_pred[i + 1:] == y_pred[i])
+        conf = np.minimum(pmax[i + 1:], pmax[i])
+        pred = same_id & (conf >= float(thr_conf))
+        truth = (y_true[i + 1:] == y_true[i])
+        TP += int(np.sum(pred & truth))
+        TN += int(np.sum((~pred) & (~truth)))
+        FP += int(np.sum(pred & (~truth)))
+        FN += int(np.sum((~pred) & truth))
+
+    pairs = n * (n - 1) // 2
+    acc = (TP + TN) / pairs if pairs > 0 else 0.0
+    mets = _binary_metrics_from_counts({"TP": TP, "TN": TN, "FP": FP, "FN": FN})
+    return {"mode": "full", "pairs": int(pairs), "acc": float(acc), "TP": TP, "TN": TN, "FP": FP, "FN": FN,
+            **{f"m_{k}": v for k, v in mets.items()}}
+
+
+def roc_curve_simple(scores: np.ndarray, truth: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """
+    ROC simples (sem sklearn). Retorna fpr, tpr, thresholds, auc.
+    truth: 1/0
+    """
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    truth = np.asarray(truth, dtype=np.int8).ravel()
+    if scores.size == 0:
+        return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32), 0.0
+    thrs = np.unique(scores)[::-1]
+    # adiciona um thr > max para ponto (0,0)
+    thrs = np.concatenate(([float(np.max(scores) + 1.0)], thrs, [float(np.min(scores) - 1.0)])).astype(np.float32)
+    Ppos = float(np.sum(truth == 1))
+    Nneg = float(np.sum(truth == 0))
+    tpr = []
+    fpr = []
+    for thr in thrs:
+        pred = scores >= float(thr)
+        cm = _binary_counts_from_pred_truth(pred, truth == 1)
+        TP = cm["TP"];
+        FP = cm["FP"]
+        tpr.append(TP / Ppos if Ppos > 0 else 0.0)
+        fpr.append(FP / Nneg if Nneg > 0 else 0.0)
+    fpr = np.asarray(fpr, dtype=np.float32)
+    tpr = np.asarray(tpr, dtype=np.float32)
+    # ordena por fpr crescente
+    order = np.argsort(fpr)
+    fpr = fpr[order]
+    tpr = tpr[order]
+    auc = float(np.trapz(tpr, fpr)) if fpr.size > 1 else 0.0
+    return fpr, tpr, thrs.astype(np.float32), auc
+
+
+def plot_roc_ova_for_classes(pick_classes: List[int], y_true: np.ndarray, proba: np.ndarray,
+                             classes_modelo: np.ndarray, out_dir: Path, roc_cfg: Dict[str, Any]):
+    """Plota ROC one-vs-all (score = probabilidade da classe)."""
+    if not roc_cfg or not bool(roc_cfg.get("enable", True)):
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"[ROC] Falha ao importar matplotlib ({e}). Pulando ROC.")
+        return
+
+    y_true = np.asarray(y_true, dtype=np.int64)
+    proba = np.asarray(proba, dtype=np.float32)
+    classes_modelo = np.asarray(classes_modelo, dtype=np.int64)
+    pick_classes = [int(c) for c in pick_classes]
+
+    plt.figure()
+    any_curve = False
+    for c in pick_classes:
+        idx = np.where(classes_modelo == int(c))[0]
+        if idx.size == 0:
+            continue
+        k = int(idx[0])
+        scores = proba[:, k]
+        truth = (y_true == int(c)).astype(np.int8)
+        fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
+        if fpr.size == 0:
+            continue
+        any_curve = True
+        plt.plot(fpr, tpr, label=f"c={c} AUC={auc:.3f}")
+
+    if not any_curve:
+        print("[ROC] Sem curvas para plotar.")
+        return
+
+    plt.plot([0, 1], [0, 1], linestyle="--", label="aleatório")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC One-vs-All (10 classes)")
+    plt.legend(loc="lower right")
+
+    if bool(roc_cfg.get("save_png", True)):
+        png_name = str(roc_cfg.get("png_name", "roc_ova_10classes.png"))
+        out_path = out_dir / png_name
+        try:
+            plt.savefig(out_path, dpi=160, bbox_inches="tight")
+            print(f"[ROC] PNG salvo em: {out_path}")
+        except Exception as e:
+            print(f"[ROC] Falha ao salvar PNG ({e}).")
+
+    if bool(roc_cfg.get("show_plots", True)):
+        plt.show()
+    else:
+        plt.close()
 
 
 def eval_auth_pairs_full(emb: np.ndarray, y: np.ndarray, thr: float) -> Dict[str, Any]:
@@ -470,9 +742,9 @@ def eval_auth_pairs_full(emb: np.ndarray, y: np.ndarray, thr: float) -> Dict[str
 
     TP = TN = FP = FN = 0
     for i in range(n - 1):
-        sims = emb[i+1:] @ emb[i]  # (n-i-1,)
+        sims = emb[i + 1:] @ emb[i]  # (n-i-1,)
         pred = sims >= float(thr)
-        truth = (y[i+1:] == y[i])
+        truth = (y[i + 1:] == y[i])
         TP += int(np.sum(pred & truth))
         TN += int(np.sum((~pred) & (~truth)))
         FP += int(np.sum(pred & (~truth)))
@@ -520,67 +792,7 @@ def eval_auth_pairs_sample(emb: np.ndarray, y: np.ndarray, thr: float, rng: np.r
 
 
 # ============================================================
-# Visualização (opcional)
-# ============================================================
-
-def try_show_and_save_anchor_images(paths: Optional[np.ndarray],
-                                    anchor_local_indices: np.ndarray,
-                                    anchor_labels: np.ndarray,
-                                    out_dir: Path,
-                                    png_name: str,
-                                    save_png: bool):
-    if paths is None:
-        print("\n[VIS] Dataset joblib não trouxe paths de imagem. Não é possível mostrar imagens originais.")
-        return
-
-    paths = np.asarray(paths)
-    if paths.ndim != 1:
-        print("\n[VIS] Paths têm formato inesperado; pulando visualização.")
-        return
-
-    try:
-        import matplotlib.pyplot as plt
-        from PIL import Image
-    except Exception as e:
-        print(f"\n[VIS] Falha ao importar matplotlib/PIL ({e}). Pulando visualização.")
-        return
-
-    imgs = []
-    for li in anchor_local_indices.tolist():
-        p = paths[int(li)]
-        try:
-            img = Image.open(p).convert("RGB")
-            imgs.append(img)
-        except Exception:
-            imgs.append(None)
-
-    if all(i is None for i in imgs):
-        print("\n[VIS] Nenhuma imagem abriu (paths inválidos/sem acesso). Pulando visualização.")
-        return
-
-    n = len(anchor_local_indices)
-    cols = 5
-    rows = int(math.ceil(n / cols))
-    fig = plt.figure(figsize=(16, 6))
-    for i in range(n):
-        ax = plt.subplot(rows, cols, i + 1)
-        img = imgs[i]
-        if img is not None:
-            ax.imshow(img)
-        ax.set_axis_off()
-        ax.set_title(f"id={int(anchor_local_indices[i])}\\ncls={int(anchor_labels[i])}", fontsize=10)
-    plt.tight_layout()
-
-    if save_png:
-        out_path = out_dir / png_name
-        fig.savefig(out_path, dpi=150)
-        print(f"\n[VIS] Grid salvo em: {out_path}")
-
-    plt.show()
-
-
-# ============================================================
-# Pipeline principal
+# Split / reconstrução de avaliação
 # ============================================================
 
 def _train_test_split_with_meta(X: np.ndarray, y: np.ndarray,
@@ -673,13 +885,18 @@ def main():
     print(" ", classes_modelo[:n_show].tolist())
 
     print("\n[INFO] Exemplos de parâmetros do modelo:")
-    W1 = modelo["W1"]; b1 = modelo["b1"]; W2 = modelo["W2"]; b2 = modelo["b2"]
+    W1 = modelo["W1"];
+    b1 = modelo["b1"];
+    W2 = modelo["W2"];
+    b2 = modelo["b2"]
     print(f"  W1: {tuple(W1.shape)} | b1: {tuple(b1.shape)}")
     print(f"  W2: {tuple(W2.shape)} | b2: {tuple(b2.shape)}")
     print(f"  act_hidden: {modelo.get('act_hidden', inference_params.get('act_hidden', '??'))}")
     print(f"  act_output: {modelo.get('act_output', inference_params.get('act_output', '??'))}")
-    print(f"  use_layernorm: {inference_params.get('use_layernorm', None)} | layernorm_eps: {inference_params.get('layernorm_eps', None)}")
-    print(f"  cosine_softmax_scale: {inference_params.get('cosine_softmax_scale', None)} | cosine_softmax_eps: {inference_params.get('cosine_softmax_eps', None)} | use_bias: {inference_params.get('cosine_softmax_use_bias', None)}")
+    print(
+        f"  use_layernorm: {inference_params.get('use_layernorm', None)} | layernorm_eps: {inference_params.get('layernorm_eps', None)}")
+    print(
+        f"  cosine_softmax_scale: {inference_params.get('cosine_softmax_scale', None)} | cosine_softmax_use_bias: {inference_params.get('cosine_softmax_use_bias', None)}")
     if "metrics" in payload:
         print("  metrics(payload):", payload["metrics"])
     if "best_hparams" in payload:
@@ -719,12 +936,14 @@ def main():
     print("\n[EVAL] Conjunto de avaliação (TESTE alinhado):")
     print("  X_eval:", tuple(X_eval.shape), X_eval.dtype)
     print("  y_eval:", tuple(y_eval.shape), y_eval.dtype)
-    print("  n_classes_eval:", int(np.unique(y_eval).size))
-    if y_eval.size == 0:
-        raise RuntimeError("y_eval ficou vazio. Algo não bateu (split/seleção/classes do modelo).")
+    print("  classes_present:", int(np.unique(y_eval).size))
+    if paths_eval is not None:
+        print("  paths_eval:", tuple(paths_eval.shape))
+    if ids_eval is not None:
+        print("  ids_eval:", tuple(ids_eval.shape))
 
     print("\n[ID] IMPORTANTE: neste script, o 'ID' de amostra para consultas = índice em X_eval (0..N-1).")
-    print(f"     N={int(y_eval.size)} (IDs válidos: 0..{int(y_eval.size)-1})")
+    print(f"     N={int(y_eval.size)} (IDs válidos: 0..{int(y_eval.size) - 1})")
 
     # =========================
     # IDENTIFICAÇÃO
@@ -745,85 +964,166 @@ def main():
         cm = confusion_one_vs_all(y_eval, y_pred, int(c))
         print_confusion_binary(title=f"[One-vs-all] classe={int(c)}", cm=cm)
 
+    # ROC (one-vs-all) para as mesmas 10 classes escolhidas acima (thresholds variados)
+    plot_roc_ova_for_classes(
+        pick_classes=pick.tolist(),
+        y_true=y_eval,
+        proba=P,
+        classes_modelo=classes_modelo,
+        out_dir=out_dir,
+        roc_cfg=SCRIPT_CONFIG.get("roc", {}) or {}
+    )
+
     # =========================
     # AUTENTICAÇÃO
     # =========================
     print("\n[AUTH] Extraindo embeddings...")
     emb = extract_embeddings(X_eval, modelo, inference_params)
+    pmax = np.max(P, axis=1).astype(np.float32, copy=False)
 
-    aconf = SCRIPT_CONFIG["auth"]
-    thr, thr_stats = tune_threshold_cosine(
-        emb=emb, y=y_eval, rng=rng,
-        pos_pairs_per_class=int(aconf["pos_pairs_per_class"]),
-        neg_pairs_total=int(aconf["neg_pairs_total"]),
-        q_grid=int(aconf["threshold_grid_q"]),
+    auth_cfg = SCRIPT_CONFIG.get("auth", {}) or {}
+    tune_metric = str(auth_cfg.get("tune_metric", "f1")).strip().lower()
+    if tune_metric not in ("f1", "balanced_acc", "acc"):
+        tune_metric = "f1"
+
+    print("[AUTH] Tuning balanceado de thresholds ...")
+    ii_t, jj_t, tt_t, pair_info = build_tuning_pairs(
+        y_eval, rng=rng,
+        pos_pairs_per_class=int(auth_cfg.get("pos_pairs_per_class", 50)),
+        neg_pairs_total=int(auth_cfg.get("neg_pairs_total", 20000)),
+        balanced=True
     )
-    print("\n[AUTH] Threshold escolhido (por tuning):", float(thr))
-    print("[AUTH] Stats tuning:", thr_stats)
 
-    mode = str(aconf["eval_mode"]).lower().strip()
-    n = int(y_eval.size)
-    if mode == "auto":
-        mode = "full" if n <= int(aconf["full_if_n_leq"]) else "sample"
-
-    if mode == "full":
-        print("\n[AUTH] Avaliando TODOS os pares (i<j)...")
-        auth_stats = eval_auth_pairs_full(emb, y_eval, thr=float(thr))
+    if int(pair_info.get("pairs_used", 0)) == 0:
+        print("[AUTH] Sem pares suficientes para tuning. Usando thresholds padrão.")
+        thr_cos = 0.5
+        thr_prob = 0.5
+        thr_conf = 0.5
     else:
-        print("\n[AUTH] Avaliando por AMOSTRAGEM de pares (N grande).")
-        auth_stats = eval_auth_pairs_sample(
-            emb, y_eval, thr=float(thr), rng=rng, n_pairs=int(aconf["sample_pairs_if_large"])
+        sims_cos = np.sum(emb[ii_t] * emb[jj_t], axis=1).astype(np.float32, copy=False)
+        sims_prob = np.sum(P[ii_t] * P[jj_t], axis=1).astype(np.float32, copy=False)
+
+        pos_mask = (tt_t == 1)
+        neg_mask = (tt_t == 0)
+        print(f"  pares tuning: {pair_info} | métrica otimizada: {tune_metric}")
+
+        # print sim_pos vs sim_neg
+        print("\n  [SCORES] cosine: pos vs neg")
+        print("    pos:", _score_summary(sims_cos[pos_mask]))
+        print("    neg:", _score_summary(sims_cos[neg_mask]))
+        print("\n  [SCORES] prob_dot: pos vs neg")
+        print("    pos:", _score_summary(sims_prob[pos_mask]))
+        print("    neg:", _score_summary(sims_prob[neg_mask]))
+
+        thr_cos, stats_cos = tune_threshold_scores(
+            sims_cos, tt_t, q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
+        )
+        thr_prob, stats_prob = tune_threshold_scores(
+            sims_prob, tt_t, q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
+        )
+        thr_conf, stats_conf = tune_threshold_identity_confidence(
+            y_pred=y_pred, pmax=pmax,
+            ii=ii_t, jj=jj_t, truth=tt_t,
+            q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
         )
 
-    print("\n[AUTH] Resultado autenticação (pares):")
-    print(" ", auth_stats)
-    if "TP" in auth_stats:
-        print_confusion_binary("[AUTH] Confusão global (same vs different)", {
-            "TP": int(auth_stats["TP"]),
-            "FP": int(auth_stats["FP"]),
-            "FN": int(auth_stats["FN"]),
-            "TN": int(auth_stats["TN"]),
-        })
+        print("\n  [TUNING] cosine:", {k: stats_cos.get(k) for k in (
+        "metric_optimized", "best_metric_value", "best_thr", "best_cm", "best_metrics")})
+        print("  [TUNING] prob_dot:", {k: stats_prob.get(k) for k in (
+        "metric_optimized", "best_metric_value", "best_thr", "best_cm", "best_metrics")})
+        print("  [TUNING] id+conf:", {k: stats_conf.get(k) for k in
+                                      ("metric_optimized", "best_metric_value", "best_thr", "best_cm", "best_metrics")})
 
-    # matrizes por âncora
-    n_anchor = int(aconf["n_anchor_images"])
+    eval_mode = str(auth_cfg.get("eval_mode", "auto")).lower()
+    full_if_n_leq = int(auth_cfg.get("full_if_n_leq", 2500))
+    n = int(y_eval.size)
+    use_full = (eval_mode == "full") or (eval_mode == "auto" and n <= full_if_n_leq)
+    print(f"\n[AUTH] Avaliação em pares: mode={'full' if use_full else 'sample'} | N={n}")
+
+    if use_full:
+        res_cos = eval_auth_pairs_full(emb, y_eval, thr=float(thr_cos))
+        res_prob = eval_auth_pairs_full_prob(P, y_eval, thr=float(thr_prob))
+        res_conf = eval_auth_pairs_full_identity_confidence(y_pred=y_pred, pmax=pmax, y_true=y_eval,
+                                                            thr_conf=float(thr_conf))
+    else:
+        res_cos = eval_auth_pairs_sample(emb, y_eval, thr=float(thr_cos), rng=rng,
+                                         n_pairs=int(auth_cfg.get("sample_pairs_if_large", 300000)))
+
+        n_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
+        ii_s, jj_s = _sample_pairs_uniform(n=int(n), rng=rng, n_pairs=int(n_pairs))
+        truth_s = (y_eval[ii_s] == y_eval[jj_s]).astype(np.int8)
+
+        sims_prob = np.sum(P[ii_s] * P[jj_s], axis=1).astype(np.float32, copy=False)
+        pred_prob = sims_prob >= float(thr_prob)
+        cm_prob = _binary_counts_from_pred_truth(pred_prob, truth_s == 1)
+        mets_prob = _binary_metrics_from_counts(cm_prob)
+        res_prob = {"mode": "sample", "pairs": int(ii_s.size), "TP": cm_prob["TP"], "TN": cm_prob["TN"],
+                    "FP": cm_prob["FP"], "FN": cm_prob["FN"], **{f"m_{k}": v for k, v in mets_prob.items()}}
+
+        same_id = (y_pred[ii_s] == y_pred[jj_s])
+        conf_s = np.minimum(pmax[ii_s], pmax[jj_s])
+        pred_conf = same_id & (conf_s >= float(thr_conf))
+        cm_conf = _binary_counts_from_pred_truth(pred_conf, truth_s == 1)
+        mets_conf = _binary_metrics_from_counts(cm_conf)
+        res_conf = {"mode": "sample", "pairs": int(ii_s.size), "TP": cm_conf["TP"], "TN": cm_conf["TN"],
+                    "FP": cm_conf["FP"], "FN": cm_conf["FN"], **{f"m_{k}": v for k, v in mets_conf.items()}}
+
+    # imprime resultados (métricas além de acurácia)
+    cm_cos = {"TP": int(res_cos.get("TP", 0)), "TN": int(res_cos.get("TN", 0)), "FP": int(res_cos.get("FP", 0)),
+              "FN": int(res_cos.get("FN", 0))}
+    mets_cos = _binary_metrics_from_counts(cm_cos)
+    print("\n[AUTH] Resultados (cosine-threshold):",
+          {"thr": float(thr_cos), "mode": res_cos.get("mode"), "pairs": res_cos.get("pairs"), **mets_cos})
+    print_confusion_binary("[AUTH] Confusão cosine (same vs different)", cm_cos)
+
+    if "m_f1" in res_prob:
+        print("[AUTH] Resultados (prob_dot-threshold):", {"thr": float(thr_prob), **{k: res_prob.get(k) for k in (
+        "mode", "pairs", "m_acc", "m_f1", "m_balanced_acc", "TP", "TN", "FP", "FN")}})
+        print_confusion_binary("[AUTH] Confusão prob_dot (same vs different)",
+                               {"TP": int(res_prob["TP"]), "TN": int(res_prob["TN"]), "FP": int(res_prob["FP"]),
+                                "FN": int(res_prob["FN"])})
+    else:
+        print("[AUTH] Resultados (prob_dot-threshold):", res_prob)
+
+    if "m_f1" in res_conf:
+        print("[AUTH] Resultados (id+conf):", {"thr_conf": float(thr_conf), **{k: res_conf.get(k) for k in (
+        "mode", "pairs", "m_acc", "m_f1", "m_balanced_acc", "TP", "TN", "FP", "FN")}})
+        print_confusion_binary("[AUTH] Confusão id+conf (same vs different)",
+                               {"TP": int(res_conf["TP"]), "TN": int(res_conf["TN"]), "FP": int(res_conf["FP"]),
+                                "FN": int(res_conf["FN"])})
+    else:
+        print("[AUTH] Resultados (id+conf):", res_conf)
+
+    # matrizes por âncora (agora: cosine vs id+conf)
+    n_anchor = int(auth_cfg.get("n_anchor_images", 10))
     anchor_idx = rng.choice(n, size=min(n_anchor, n), replace=False).astype(np.int64, copy=False)
 
     print("\n[AUTH] Matrizes por âncora (TP/FP/FN/TN vs todas as outras amostras):")
     for ai in anchor_idx.tolist():
-        sims = emb @ emb[int(ai)]
         mask_other = np.ones(n, dtype=bool)
         mask_other[int(ai)] = False
-
-        pred_same = (sims >= float(thr)) & mask_other
         truth_same = (y_eval == y_eval[int(ai)]) & mask_other
 
-        TP = int(np.sum(pred_same & truth_same))
-        TN = int(np.sum((~pred_same) & (~truth_same) & mask_other))
-        FP = int(np.sum(pred_same & (~truth_same)))
-        FN = int(np.sum((~pred_same) & truth_same))
+        sims = emb @ emb[int(ai)]
+        pred_same_cos = (sims >= float(thr_cos)) & mask_other
+        cm_a_cos = _binary_counts_from_pred_truth(pred_same_cos, truth_same)
+        mets_a_cos = _binary_metrics_from_counts(cm_a_cos)
 
-        print_confusion_binary(
-            title=f"[Âncora] id={int(ai)} | cls={int(y_eval[int(ai)])}",
-            cm={"TP": TP, "FP": FP, "FN": FN, "TN": TN},
-        )
+        pred_same_conf = ((y_pred == y_pred[int(ai)]) & (
+                    np.minimum(pmax, pmax[int(ai)]) >= float(thr_conf))) & mask_other
+        cm_a_conf = _binary_counts_from_pred_truth(pred_same_conf, truth_same)
+        mets_a_conf = _binary_metrics_from_counts(cm_a_conf)
 
-    # VISUALIZAÇÃO
-    if int(anchor_idx.size) > 0:
-        try_show_and_save_anchor_images(
-            paths=paths_eval,
-            anchor_local_indices=anchor_idx,
-            anchor_labels=y_eval[anchor_idx],
-            out_dir=out_dir,
-            png_name=str(SCRIPT_CONFIG["anchor_grid_png_name"]),
-            save_png=bool(SCRIPT_CONFIG["save_anchor_grid_png"]),
-        )
+        print(f"  âncora idx={int(ai)} | true_class={int(y_eval[int(ai)])}")
+        print(f"    cosine: thr={float(thr_cos):.4f} | {mets_a_cos} | cm={cm_a_cos}")
+        print(f"    id+conf: thr_conf={float(thr_conf):.4f} | {mets_a_conf} | cm={cm_a_conf}")
 
     # INTERATIVO
     if bool(SCRIPT_CONFIG["enable_interactive_queries"]):
         print("\n[INTERATIVO] Ligado. Digite 'q' para sair.")
         while True:
-            cmd = input("\nEscolha: (1) Predizer classe por ID | (2) Autenticar por dois IDs | (q) sair : ").strip().lower()
+            cmd = input(
+                "\nEscolha: (1) Predizer classe por ID | (2) Autenticar por dois IDs | (q) sair : ").strip().lower()
             if cmd in ("q", "quit", "exit"):
                 break
 
@@ -839,23 +1139,20 @@ def main():
                 if idx < 0 or idx >= n:
                     print("Fora do intervalo.")
                     continue
-                x = X_eval[idx:idx+1]
-                yhat, P1 = predict_labels(x, classes_modelo, modelo, inference_params)
-                topk = np.argsort(-P1[0])[:5]
-                print(f"  y_pred={int(yhat[0])} | pmax={float(P1[0].max()):.4f}")
-                print("  top5:")
-                for k in topk.tolist():
-                    print(f"    cls={int(classes_modelo[k])} p={float(P1[0][k]):.4f}")
+                topk = np.argsort(-P[idx])[:5]
+                print(f"  y_pred={int(y_pred[idx])} | pmax={float(P[idx].max()):.4f}")
+                print("  top5:", [(int(classes_modelo[k]), float(P[idx][k])) for k in topk])
 
             elif cmd == "2":
-                s1 = input("Digite o ID da amostra 1: ").strip()
+                s1 = input("Digite o ID i (0..N-1): ").strip()
                 if s1.lower() in ("q", "quit", "exit"):
                     break
-                s2 = input("Digite o ID da amostra 2: ").strip()
+                s2 = input("Digite o ID j (0..N-1): ").strip()
                 if s2.lower() in ("q", "quit", "exit"):
                     break
                 try:
-                    i = int(s1); j = int(s2)
+                    i = int(s1);
+                    j = int(s2)
                 except Exception:
                     print("IDs inválidos.")
                     continue
@@ -863,32 +1160,24 @@ def main():
                     print("Fora do intervalo.")
                     continue
 
-                sim = float(np.dot(emb[i], emb[j]))
-                same = sim >= float(thr)
-                yhat_i, Pi = predict_labels(X_eval[i:i+1], classes_modelo, modelo, inference_params)
-                yhat_j, Pj = predict_labels(X_eval[j:j+1], classes_modelo, modelo, inference_params)
+                sim_cos = float(np.dot(emb[i], emb[j]))
+                sim_prob = float(np.dot(P[i], P[j]))
+                same_cos = sim_cos >= float(thr_cos)
+                same_prob = sim_prob >= float(thr_prob)
+                same_conf = (int(y_pred[i]) == int(y_pred[j])) and (float(min(pmax[i], pmax[j])) >= float(thr_conf))
 
-                print(f"  sim(cos)={sim:.4f} | thr={float(thr):.4f} | same? {bool(same)}")
-                print(f"  pred1={int(yhat_i[0])} (pmax={float(Pi[0].max()):.4f}) | pred2={int(yhat_j[0])} (pmax={float(Pj[0].max()):.4f})")
-
-                if same:
-                    if int(yhat_i[0]) == int(yhat_j[0]):
-                        print(f"  => MESMA classe (pelo modelo): {int(yhat_i[0])}")
-                    else:
-                        if float(Pi[0].max()) >= float(Pj[0].max()):
-                            print(f"  => MESMA pessoa? (pela similaridade) | classe sugerida={int(yhat_i[0])} (mais confiante)")
-                        else:
-                            print(f"  => MESMA pessoa? (pela similaridade) | classe sugerida={int(yhat_j[0])} (mais confiante)")
+                print(f"  cosine_sim={sim_cos:.4f} | thr_cos={float(thr_cos):.4f} | same? {bool(same_cos)}")
+                print(f"  prob_dot={sim_prob:.4f} | thr_prob={float(thr_prob):.4f} | same? {bool(same_prob)}")
+                print(
+                    f"  id+conf: yhat_i={int(y_pred[i])} (pmax={float(pmax[i]):.4f}) | yhat_j={int(y_pred[j])} (pmax={float(pmax[j]):.4f}) | thr_conf={float(thr_conf):.4f} | same? {bool(same_conf)}")
+                if same_conf:
+                    print(f"  ==> Prediz MESMA pessoa: classe={int(y_pred[i])}")
                 else:
-                    print("  => NÃO são da mesma classe (pelo threshold).")
+                    print("  ==> Prediz pessoas DIFERENTES")
 
             else:
-                print("Comando desconhecido. Use 1, 2 ou q.")
+                print("Comando inválido (use 1, 2 ou q).")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print("\n[ERRO] Execução falhou:", repr(e))
-        sys.exit(1)
+    main()
