@@ -727,6 +727,90 @@ def escolher_melhores_lambdas_por_cv(
 
     return best
 
+# ============================================================
+# TXT LOGS (config + erros) - COLAR NO FINAL DO ARQUIVO
+# ============================================================
+
+def salvar_config_logistico_txt(out_dir: Path, payload: dict, filename: str = "config_logistico.txt") -> Path:
+    """
+    Salva um .txt com:
+      - hiperparâmetros finais (best_hparams)
+      - info do CV (cv_info)
+      - resumo do treino
+    """
+    import json
+    from datetime import datetime
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pega partes leves/úteis do payload (evita salvar mean/std gigantes, W/b, etc)
+    config_snapshot = payload.get("config_snapshot", {})
+    best_hparams = payload.get("best_hparams", {})
+    cv_info = payload.get("cv_info", {})
+    model_kind = payload.get("model_kind", "unknown")
+
+    stats = {}
+    modelo = payload.get("modelo", {})
+    if isinstance(modelo, dict):
+        st = modelo.get("stats", {}) or {}
+        # Extrato (evita alpha_epoch inteiro)
+        keys_keep = [
+            "alpha_mean", "alpha_median", "alpha_min", "alpha_max",
+            "armijo_bt_mean", "armijo_bt_max",
+            "early_stop_enabled", "early_stop_metric", "early_stop_best_metric",
+            "early_stop_best_epoch", "early_stop_stopped", "early_stop_epochs_ran",
+        ]
+        stats = {k: st.get(k) for k in keys_keep if k in st}
+
+    doc = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "model_kind": model_kind,
+        "best_hparams": best_hparams,
+        "cv_info": cv_info,
+        "train_summary_stats": stats,
+        "config_snapshot": config_snapshot,
+    }
+
+    path = out_dir / filename
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def salvar_erro_logistico_txt(out_dir: Path, payload: dict, filename: str = "erro_logistico.txt") -> Path:
+    """
+    Salva um .txt com as acurácias finais em treino e teste (do payload["metrics"]).
+    """
+    from datetime import datetime
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    model_kind = payload.get("model_kind", "unknown")
+    best_hparams = payload.get("best_hparams", {})
+    cv_info = payload.get("cv_info", {})
+    metrics = payload.get("metrics", {}) or {}
+
+    acc_tr = metrics.get("acc_train_final_sample", float("nan"))
+    acc_te = metrics.get("acc_test", float("nan"))
+
+    lines = []
+    lines.append(f"generated_at: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"model_kind: {model_kind}")
+    lines.append(f"best_hparams: {best_hparams}")
+    if cv_info:
+        lines.append(f"cv_info: {cv_info}")
+    lines.append("")
+    lines.append("FINAL ACCURACY")
+    lines.append(f"train_acc (final sample): {acc_tr:.6f}" if acc_tr == acc_tr else "train_acc (final sample): nan")
+    lines.append(f"test_acc:                {acc_te:.6f}" if acc_te == acc_te else "test_acc:                nan")
+    lines.append("")
+
+    path = out_dir / filename
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 
 # ============================================================
 # MAIN
@@ -927,6 +1011,8 @@ def main():
     print()
     print(f"[SAVE] Modelo (Regressão Logística) + classes salvos em: {save_path}")
 
+    salvar_config_logistico_txt(out_dir, payload)  # -> config_logistico.txt
+    salvar_erro_logistico_txt(out_dir, payload)    # -> erro_logistico.txt
 
 if __name__ == "__main__":
     main()
