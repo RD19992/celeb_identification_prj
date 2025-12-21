@@ -62,7 +62,7 @@ CONFIG = {
     # CV (k-fold=5 fixo)
     # -----------------
     "k_folds": 5,
-    "cv_frac": 0.40,  # você usou 0.40
+    "cv_frac": 1.00,  # conjunto completo para melhor resultado
     # [MELHORIA 6] mínimo por classe no CV deve ser bem maior que k para ser informativo.
     # Sugestão: 5*k (ex.: 25) ou 20, o que for maior.
     "cv_min_por_classe": None,  # None -> usa max(5*k_folds, 20)
@@ -87,7 +87,7 @@ CONFIG = {
     # [CORREÇÃO 4] Dropout menor por padrão
     "dropout_hidden_p": 0.10,
     # Grid de dropout (otimizado no CV)
-    "grid_dropout": [0.05, 0.10, 0.15],
+    "grid_dropout": [0.025, 0.05, 0.10],
     # 0.0 desliga
 
     # [CORREÇÃO 5] LayerNorm treinável antes da ativação (ajuda estabilidade)
@@ -131,7 +131,7 @@ CONFIG = {
     "use_nesterov": False,
 
     # [CORREÇÃO 1] LR schedule (warmup + teto + decaimento)
-    "lr_base": 0.8,  # LR após warmup
+    "lr_base": 0.3,  # LR após warmup
     "lr_min": 1e-4,
     "lr_warmup_epochs": 5,
     "lr_warmup_start": 0.10,  # LR inicial do warmup
