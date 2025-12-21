@@ -97,7 +97,7 @@ CONFIG = {
     "batch_size_final": 128,
 
     # Gaussian noise (somente no treino; X já é padronizado)
-    "gaussian_noise_std": 0.00,  # ex.: 0.01; 0.0 desliga
+    "gaussian_noise_std": 0.01,  # ex.: 0.01; 0.0 desliga
 
     # batches quase-balanceados (gera uma permutação que intercalada classes)
     "use_almost_balanced_batches": True,
