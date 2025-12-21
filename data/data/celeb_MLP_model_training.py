@@ -1555,5 +1555,47 @@ def main():
     confusion_top_k(y_test_final, yhat_te, top_k=int(CONFIG["top_k_confusao"]))
 
 
+    # ============================================================
+    # SAVE (modelo + classes + normalização) - ADICIONADO
+    # ============================================================
+    out_dir = (Path(__file__).resolve().parent
+               if "__file__" in globals() else Path.cwd())
+    save_path = out_dir / "mlp_pm_model_and_classes.joblib"
+
+    payload = {
+        # inclui pesos (W1,b1,W2,b2, ln_gamma, ln_beta) + stats + activations
+        "modelo": modelo,
+        "classes_usadas": np.asarray(classes_final, dtype=np.int64),
+
+        # necessário para aplicar a mesma normalização em inferência
+        "standardizer": {
+            "mean": mean_tr,
+            "std": std_tr,
+            "eps_std": float(CONFIG["eps_std"]),
+        },
+
+        # parâmetros necessários para reproduzir o forward (especialmente cosine-softmax)
+        "inference_params": {
+            "act_hidden": str(CONFIG["act_hidden"]),
+            "act_output": str(CONFIG["act_output"]),
+            "use_layernorm": bool(CONFIG["use_layernorm"]),
+            "layernorm_eps": float(CONFIG["layernorm_eps"]),
+            "cosine_softmax_scale": float(CONFIG["cosine_softmax_scale"]),
+            "cosine_softmax_eps": float(CONFIG["cosine_softmax_eps"]),
+            "cosine_softmax_use_bias": bool(CONFIG["cosine_softmax_use_bias"]),
+        },
+
+        # meta-info (opcional, mas útil)
+        "best_hparams": {"l2": float(best_l2), "dropout": float(best_dropout)},
+        "metrics": {"acc_train": float(acc_tr), "acc_test": float(acc_te)},
+        "config_snapshot": dict(CONFIG),
+    }
+
+    joblib.dump(payload, save_path, compress=3)
+    print()
+    print(f"[SAVE] Modelo + classes salvos em: {save_path}")
+
+
+
 if __name__ == "__main__":
     main()
