@@ -135,9 +135,9 @@ CONFIG = {
     "early_stop_cv_enabled": True,
     "early_stop_final_enabled": True,
     "early_stop_metric": "val_acc",  # "val_loss" ou "val_acc"
-    "early_stop_patience": 15,
+    "early_stop_patience": 10,
     "early_stop_min_delta": 1e-4,
-    "early_stop_warmup_epochs": 5,
+    "early_stop_warmup_epochs": 3,
     "early_stop_restore_best": True,
 
     # split interno treino/val no treino final (para early stopping)
