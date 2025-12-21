@@ -596,7 +596,90 @@ def main():
     # matriz confusão top-k
     avaliar_teste_top10(y_test=y_test, y_pred_test=y_pred_test, top_k=CONFIG["top_k_confusao"])
 
+# ============================================================
+# Relatórios rápidos de distribuição de classes (top/bottom)
+# Cole este bloco antes do `if __name__ == "__main__":`
+# ============================================================
 
+def _print_top_bottom_from_counts(classes_sorted, counts_sorted, top_n=10, bottom_n=10, titulo=""):
+    total = int(np.sum(counts_sorted))
+    n_classes = int(len(classes_sorted))
+
+    if titulo:
+        print(f"\n[{titulo}]")
+
+    print(f"  Total de instâncias no subset: {total}")
+    print(f"  Total de classes no subset:    {n_classes}")
+
+    if n_classes == 0:
+        print("  (subset vazio)")
+        return
+
+    # Top-N
+    k_top = min(top_n, n_classes)
+    print(f"\n  Top-{k_top} classes (mais frequentes):")
+    for i in range(k_top):
+        c = int(classes_sorted[i])
+        cnt = int(counts_sorted[i])
+        pct = 100.0 * cnt / max(1, total)
+        print(f"    #{i+1:02d}  classe={c}  n={cnt}  ({pct:.2f}%)")
+
+    # Bottom-N
+    k_bot = min(bottom_n, n_classes)
+    print(f"\n  Bottom-{k_bot} classes (menos frequentes):")
+    start = n_classes - k_bot
+    for j in range(k_bot):
+        i = start + j
+        c = int(classes_sorted[i])
+        cnt = int(counts_sorted[i])
+        pct = 100.0 * cnt / max(1, total)
+        print(f"    #{j+1:02d}  classe={c}  n={cnt}  ({pct:.2f}%)")
+
+
+def relatorio_top_bottom_classes(y_subset, top_n=10, bottom_n=10, titulo=""):
+    """
+    Dado um y_subset (ex.: y_final), imprime quantas instâncias existem
+    nas top-10 e bottom-10 classes desse subset.
+    """
+    y_subset = np.asarray(y_subset)
+    classes, counts = np.unique(y_subset, return_counts=True)
+    ordem = np.argsort(-counts)  # desc
+    classes_sorted = classes[ordem]
+    counts_sorted = counts[ordem]
+    _print_top_bottom_from_counts(classes_sorted, counts_sorted, top_n, bottom_n, titulo=titulo)
+
+
+def relatorio_top_frac_classes(y_base, frac_top_classes=0.20, top_n=10, bottom_n=10, titulo=""):
+    """
+    1) Seleciona as top (frac_top_classes) CLASSES por frequência em y_base
+    2) Dentro desse subset de classes, imprime top-10 e bottom-10 por contagem.
+
+    Ex.: frac_top_classes=0.20 => pega as 20% classes mais frequentes.
+    """
+    y_base = np.asarray(y_base)
+
+    classes, counts = np.unique(y_base, return_counts=True)
+    ordem = np.argsort(-counts)  # desc
+    classes_sorted = classes[ordem]
+    counts_sorted = counts[ordem]
+
+    n_classes = len(classes_sorted)
+    k = int(np.ceil(frac_top_classes * n_classes))
+    k = max(1, min(k, n_classes))
+
+    classes_top = classes_sorted[:k]
+    mask = np.isin(y_base, classes_top)
+    y_sub = y_base[mask]
+
+    print(f"\n[Top {100*frac_top_classes:.1f}% classes] Mantidas {k}/{n_classes} classes | "
+          f"Instâncias mantidas: {len(y_sub)}/{len(y_base)} ({100*len(y_sub)/max(1,len(y_base)):.2f}%)")
+
+    # Recalcula contagens dentro do subset de classes
+    classes2, counts2 = np.unique(y_sub, return_counts=True)
+    ordem2 = np.argsort(-counts2)
+    _print_top_bottom_from_counts(classes2[ordem2], counts2[ordem2], top_n, bottom_n, titulo=titulo)
+
+relatorio_top_bottom_classes(y_final, top_n=10, bottom_n=10, titulo="Distribuição no y_final (final_frac)")
 
 if __name__ == "__main__":
     main()
