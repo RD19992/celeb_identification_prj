@@ -789,8 +789,30 @@ def build_eval_split_from_payload(X: np.ndarray, y: np.ndarray,
 def main():
     rng = np.random.default_rng(int(SCRIPT_CONFIG["seed"]))
 
-    out_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
-    payload_path = out_dir / str(SCRIPT_CONFIG["model_payload_file"])
+    payload_spec = str(SCRIPT_CONFIG["model_payload_file"])
+    payload_path = Path(payload_spec)
+
+    if not payload_path.is_absolute():
+        script_dir = Path(__file__).resolve().parent
+        cwd = Path.cwd()
+
+        candidates = [
+            script_dir / payload_spec,
+            cwd / payload_spec,
+            script_dir / "data" / payload_spec,
+            cwd / "data" / payload_spec,
+        ]
+
+        found = None
+        for cand in candidates:
+            if cand.exists():
+                found = cand
+                break
+
+        if found is not None:
+            payload_path = found
+        else:
+            payload_path = script_dir / payload_spec  # fallback padrão
 
     if not payload_path.exists():
         raise FileNotFoundError(f"Não achei o payload do modelo em: {payload_path}")
