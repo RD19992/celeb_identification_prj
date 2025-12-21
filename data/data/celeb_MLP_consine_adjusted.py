@@ -38,7 +38,7 @@ CONFIG = {
     # CV (k-fold=5 fixo)
     # -----------------
     "k_folds": 5,
-    "cv_frac": 1.00,  # conjunto completo para melhor resultado
+    "cv_frac": 0.30,  # 30% classes para CV
     # [MELHORIA 6] mínimo por classe no CV deve ser bem maior que k para ser informativo.
     # Sugestão: 5*k (ex.: 25) ou 20, o que for maior.
     "cv_min_por_classe": None,  # None -> usa max(5*k_folds, 20)
