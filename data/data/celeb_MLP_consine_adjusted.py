@@ -42,7 +42,7 @@ CONFIG = {
     # [MELHORIA 6] mínimo por classe no CV deve ser bem maior que k para ser informativo.
     # Sugestão: 5*k (ex.: 25) ou 20, o que for maior.
     "cv_min_por_classe": None,  # None -> usa max(5*k_folds, 20)
-    "cv_max_classes": None,  # opcional: limita #classes no CV (acelera MUITO), mantendo min/cls alto
+    "cv_max_classes": 500,  # opcional: limita #classes no CV (acelera MUITO), mantendo min/cls alto
 
     # treino final
     "final_frac": 1.00,
@@ -127,7 +127,7 @@ CONFIG = {
     # -----------------
     # Se >0: para o gradiente no treino, atualiza apenas classes verdadeiras + negativos aleatórios.
     # Predição/val/test continuam usando softmax completo (exato).
-    "sampled_softmax_neg_k": 0,  # 0 desliga (padrão)
+    "sampled_softmax_neg_k": 512,  # 0 desliga (padrão)
 
     # -----------------
     # Early stopping (CV e treino final)
