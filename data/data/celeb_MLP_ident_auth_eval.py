@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import math
+import time
 import joblib
 import numpy as np
 from pathlib import Path
@@ -44,9 +45,13 @@ SCRIPT_CONFIG = {
         "png_name": "roc_ova_10classes.png",
     },
 
-    # AUC macro (one-vs-rest) para todas as classes (ativar/desativar)
+    # OBS: "macro_auc" abaixo mede AUC de IDENTIFICAÇÃO (one-vs-rest por classe).
+    # Isso NÃO é AUC de autenticação (same vs different). Para evitar confusão,
+    # deixamos DESLIGADO por padrão. Você pode ligar quando quiser.
     "macro_auc": {
-        "enable": True,
+        "enable": False,
+        "use_fast_auc": True,  # True: usa roc_auc_fast (mais rápido); False: usa roc_curve_simple
+        "progress_every": 50,    # imprime status a cada N classes
     },
 
     # autenticação
@@ -63,9 +68,30 @@ SCRIPT_CONFIG = {
         "eval_mode": "auto",  # "auto" | "full" | "sample"
         "full_if_n_leq": 2500,  # se N <= isso, tenta full (O(N^2))
         "sample_pairs_if_large": 300000,  # #pares amostrados se N grande
+        "pairs_fraction": 1.0,  # 0..1: fração dos pares amostrados usada em avaliação/AUC (1.0 = 100%)
 
         # matrizes por âncora
         "n_anchor_images": 10,
+
+        # =====================================================
+        # Macro AUC (AUTENTICAÇÃO) por identidade
+        # =====================================================
+        # O AUC global acima (same vs different) é um "micro-AUC":
+        # cada PAR conta igualmente, então classes com mais imagens pesam mais.
+        # Este bloco calcula um "macro-AUC":
+        #   1) para cada identidade/classe c, amostra pares POS (c vs c) e NEG (c vs ~c)
+        #   2) calcula AUC(c)
+        #   3) tira a média simples dos AUC(c) em todas as classes
+        # Isso corresponde ao que você descreveu como "média do AUC one-vs-all de todas as classes"
+        # no contexto de autenticação (verificação).
+        "macro_auc": {
+            "enable": True,
+            "pos_pairs_per_class": 30,
+            "neg_pairs_per_class": 60,
+            "classes_fraction": 1.0,  # 1.0 = usa todas as classes; <1.0 amostra subconjunto
+            "max_classes": 0,         # 0 = sem limite; >0 limita #classes (amostradas) por custo
+            "progress_every": 100,
+        },
     },
 
     # modo interativo (input)
@@ -383,6 +409,269 @@ def _sample_negative_pairs(y: np.ndarray, rng: np.random.Generator, total: int):
     return pairs
 
 
+def _sample_pairs_uniform(n: int, rng: np.random.Generator, n_pairs: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Amostra n_pairs pares (i<j) aproximadamente uniformes (com reposição).
+
+    Observações:
+      - Para n grande, amostragem SEM reposição/sem duplicatas é cara e desnecessária aqui.
+      - Duplicatas têm efeito desprezível nas métricas/ROC quando n_pairs é grande.
+
+    Retorna:
+      ii, jj: arrays int64 com shape (n_pairs,), com ii[k] < jj[k] e ii[k] != jj[k].
+    """
+    n = int(n)
+    n_pairs = int(n_pairs)
+    if n < 2 or n_pairs <= 0:
+        return (np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64))
+
+    ii = rng.integers(0, n, size=n_pairs, dtype=np.int64)
+    jj = rng.integers(0, n, size=n_pairs, dtype=np.int64)
+
+    # garante i != j (re-amostra apenas onde necessário)
+    mask = (ii == jj)
+    while np.any(mask):
+        jj[mask] = rng.integers(0, n, size=int(np.sum(mask)), dtype=np.int64)
+        mask = (ii == jj)
+
+    # normaliza para i < j
+    swap = ii > jj
+    if np.any(swap):
+        tmp = ii[swap].copy()
+        ii[swap] = jj[swap]
+        jj[swap] = tmp
+
+    return ii, jj
+
+
+def roc_auc_fast(scores: np.ndarray, truth: np.ndarray) -> float:
+    """Calcula AUC ROC binária em O(n log n).
+
+    Motivação: a função roc_curve_simple() existente enumera TODOS os thresholds únicos,
+    o que explode para centenas de milhares/milhões de pares. Aqui usamos o método padrão:
+    ordena por score decrescente e calcula cumulativos (equivalente ao sklearn).
+
+    Ref (intuição/ROC): T. Fawcett, "An introduction to ROC analysis", Pattern Recognition Letters, 2006.
+    """
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    truth = np.asarray(truth).astype(bool).ravel()
+
+    if scores.size == 0:
+        return 0.0
+
+    # total de positivos/negativos
+    P = int(np.sum(truth))
+    N = int(truth.size - P)
+    if P == 0 or N == 0:
+        return 0.0
+
+    order = np.argsort(-scores, kind="mergesort")
+    scores_s = scores[order]
+    truth_s = truth[order].astype(np.int8)
+
+    tp = np.cumsum(truth_s, dtype=np.int64)
+    fp = np.cumsum(1 - truth_s, dtype=np.int64)
+
+    # pontos apenas onde o score muda (thresholds distintos)
+    distinct = np.where(np.diff(scores_s) != 0)[0]
+    idx = np.r_[distinct, truth_s.size - 1]
+
+    tpr = tp[idx] / float(P)
+    fpr = fp[idx] / float(N)
+
+    # inclui origem (0,0)
+    tpr = np.r_[0.0, tpr.astype(np.float64, copy=False)]
+    fpr = np.r_[0.0, fpr.astype(np.float64, copy=False)]
+
+    # integral trapezoidal
+    if hasattr(np, "trapezoid"):
+        auc = float(np.trapezoid(tpr, fpr))
+    else:
+        auc = float(np.trapz(tpr, fpr))
+    return auc
+
+
+def auth_macro_auc_per_identity(
+        emb: np.ndarray,
+        P: np.ndarray,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        pmax: np.ndarray,
+        rng: np.random.Generator,
+        cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Macro ROC-AUC de AUTENTICAÇÃO por identidade (one-vs-all).
+
+    Para cada classe/identidade c:
+      - Positivos: pares (i,j) com y[i]==c e y[j]==c (mesma identidade)
+      - Negativos: pares (i,j) com y[i]==c e y[j]!=c (ou vice-versa; aqui usamos i em c e j fora)
+      - Calcula AUC(c) para diferentes scores de verificação:
+          1) cosine  : dot de embeddings L2-normalizados (cosine similarity)
+          2) prob_dot: dot entre vetores de probas por classe
+          3) id+conf : (mesmo ID predito) * min(conf_i, conf_j)
+    No fim, retorna média simples (macro) dos AUC(c) nas classes válidas.
+
+    Observação importante:
+      - Isto difere do AUC global (micro-AUC) que usa pares amostrados no dataset todo.
+      - Macro-AUC dá o mesmo peso para cada identidade/classe, mesmo se algumas têm muito mais imagens.
+    """
+    enable = bool(cfg.get("enable", False))
+    if not enable:
+        return {"enabled": False}
+
+    pos_pairs_per_class = int(cfg.get("pos_pairs_per_class", 30))
+    neg_pairs_per_class = int(cfg.get("neg_pairs_per_class", 60))
+    classes_fraction = float(cfg.get("classes_fraction", 1.0))
+    max_classes = int(cfg.get("max_classes", 0))
+    progress_every = int(cfg.get("progress_every", 100))
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    pmax = np.asarray(pmax, dtype=np.float32).ravel()
+    emb = np.asarray(emb, dtype=np.float32)
+    P = np.asarray(P, dtype=np.float32)
+
+    classes = np.unique(y_true)
+    if classes.size == 0:
+        return {"enabled": True, "n_classes_used": 0}
+
+    # amostra subconjunto de classes, se configurado
+    if 0.0 < classes_fraction < 1.0:
+        k = max(1, int(round(classes.size * classes_fraction)))
+        classes = rng.choice(classes, size=k, replace=False)
+
+    if max_classes > 0 and classes.size > max_classes:
+        classes = rng.choice(classes, size=max_classes, replace=False)
+
+    auc_cos_list: list[float] = []
+    auc_prob_list: list[float] = []
+    auc_conf_list: list[float] = []
+    used_classes: list[int] = []
+
+    t0 = time.time()
+    for t, c in enumerate(classes.tolist(), start=1):
+        idx = np.where(y_true == c)[0].astype(np.int64, copy=False)
+        if idx.size < 2:
+            continue
+        idx_other = np.where(y_true != c)[0].astype(np.int64, copy=False)
+        if idx_other.size < 1:
+            continue
+
+        k_pos = min(pos_pairs_per_class, 10_000_000)  # guard rail
+        k_neg = min(neg_pairs_per_class, 10_000_000)
+        if k_pos <= 0 or k_neg <= 0:
+            continue
+
+        # --- amostra positivos (c vs c)
+        ii_pos = idx[rng.integers(0, idx.size, size=k_pos, dtype=np.int64)]
+        jj_pos = idx[rng.integers(0, idx.size, size=k_pos, dtype=np.int64)]
+        mask = (ii_pos == jj_pos)
+        # evita i==j (re-amostra apenas onde necessário)
+        while np.any(mask):
+            jj_pos[mask] = idx[rng.integers(0, idx.size, size=int(np.sum(mask)), dtype=np.int64)]
+            mask = (ii_pos == jj_pos)
+
+        # --- amostra negativos (c vs ~c)
+        ii_neg = idx[rng.integers(0, idx.size, size=k_neg, dtype=np.int64)]
+        jj_neg = idx_other[rng.integers(0, idx_other.size, size=k_neg, dtype=np.int64)]
+
+        ii = np.concatenate([ii_pos, ii_neg], axis=0)
+        jj = np.concatenate([jj_pos, jj_neg], axis=0)
+        truth = np.concatenate([
+            np.ones((k_pos,), dtype=np.int8),
+            np.zeros((k_neg,), dtype=np.int8),
+        ], axis=0).astype(bool)
+
+        # scores contínuos
+        s_cos = np.sum(emb[ii] * emb[jj], axis=1)
+        s_prob = np.sum(P[ii] * P[jj], axis=1)
+        same_id = (y_pred[ii] == y_pred[jj]).astype(np.float32)
+        conf = np.minimum(pmax[ii], pmax[jj])
+        s_conf = conf * same_id
+
+        auc_cos_list.append(float(roc_auc_fast(s_cos, truth)))
+        auc_prob_list.append(float(roc_auc_fast(s_prob, truth)))
+        auc_conf_list.append(float(roc_auc_fast(s_conf, truth)))
+        used_classes.append(int(c))
+
+        if progress_every > 0 and (t % progress_every == 0):
+            dt = max(1e-6, time.time() - t0)
+            rate = t / dt
+            remaining = (len(classes) - t) / max(1e-9, rate)
+            print(f"  [AUTH][macro-AUC] classes processadas: {t}/{len(classes)} | usadas={len(used_classes)} | "
+                  f"vel={rate:.1f} cls/s | ETA~{remaining:.1f}s")
+
+    if len(used_classes) == 0:
+        return {"enabled": True, "n_classes_used": 0}
+
+    return {
+        "enabled": True,
+        "n_classes_used": int(len(used_classes)),
+        "classes_used": used_classes,
+        "cos_mean": float(np.mean(auc_cos_list)),
+        "prob_mean": float(np.mean(auc_prob_list)),
+        "conf_mean": float(np.mean(auc_conf_list)),
+        "cos_median": float(np.median(auc_cos_list)),
+        "prob_median": float(np.median(auc_prob_list)),
+        "conf_median": float(np.median(auc_conf_list)),
+    }
+
+
+def _pair_dot_scores_batched(A: np.ndarray, ii: np.ndarray, jj: np.ndarray,
+                            batch: int = 50000, label: str = "pairs") -> np.ndarray:
+    """Calcula dot(A[ii], A[jj]) em batches com tracker de progresso.
+
+    Usado para autenticação por similaridade (ex.: cosine) e para prob_dot (dot entre vetores de probas).
+    """
+    A = np.asarray(A, dtype=np.float32)
+    ii = np.asarray(ii, dtype=np.int64).ravel()
+    jj = np.asarray(jj, dtype=np.int64).ravel()
+    n_pairs = int(ii.size)
+    out = np.empty((n_pairs,), dtype=np.float32)
+
+    if n_pairs == 0:
+        return out
+
+    # Ajuste dinâmico de batch para evitar estouro de memória quando a dimensão é grande
+    # (ex.: P tem milhares de classes; fancy-indexing já materializa (batch, dim)).
+    batch = int(max(1, batch))
+    if A.ndim == 2:
+        d = int(A.shape[1])
+        max_elems = 25_000_000  # ~100MB por matriz float32
+        if d > 0:
+            batch = min(batch, max(1, max_elems // d))
+
+    # tracker: imprime ~a cada 10% ou a cada 50k, o que ocorrer primeiro
+    step_print = max(50000, (n_pairs // 10) if n_pairs >= 10 else 1)
+
+    done = 0
+    for start in range(0, n_pairs, batch):
+        end = min(n_pairs, start + batch)
+        Ai = A[ii[start:end]]
+        Aj = A[jj[start:end]]
+        out[start:end] = np.einsum("ij,ij->i", Ai, Aj, optimize=True).astype(np.float32, copy=False)
+
+        done = end
+        if done == n_pairs or (done % step_print) == 0:
+            pct = 100.0 * done / float(n_pairs)
+            print(f"    [AUC-pairs] {label}: {done}/{n_pairs} ({pct:.1f}%)")
+
+    return out
+
+    batch = int(max(1, batch))
+    # tracker: imprime ~a cada 10% ou a cada 50k, o que ocorrer primeiro
+    step_print = max(50000, (n_pairs // 10) if n_pairs >= 10 else 1)
+
+    done = 0
+    for start in range(0, n_pairs, batch):
+        end = min(n_pairs, start + batch)
+        out[start:end] = np.sum(A[ii[start:end]] * A[jj[start:end]], axis=1).astype(np.float32, copy=False)
+        done = end
+        if done == n_pairs or (done % step_print) == 0:
+            pct = 100.0 * done / float(n_pairs)
+            print(f"    [AUC-pairs] {label}: {done}/{n_pairs} ({pct:.1f}%)")
+    return out
+
+
 def _binary_counts_from_pred_truth(pred: np.ndarray, truth: np.ndarray) -> Dict[str, int]:
     pred = np.asarray(pred).astype(bool)
     truth = np.asarray(truth).astype(bool)
@@ -647,7 +936,7 @@ def roc_curve_simple(scores: np.ndarray, truth: np.ndarray) -> Tuple[np.ndarray,
     order = np.argsort(fpr)
     fpr = fpr[order]
     tpr = tpr[order]
-    auc = float(np.trapz(tpr, fpr)) if fpr.size > 1 else 0.0
+    auc = float(np.trapezoid(tpr, fpr)) if (hasattr(np, "trapezoid") and fpr.size > 1) else (float(np.trapz(tpr, fpr)) if fpr.size > 1 else 0.0)
     return fpr, tpr, thrs.astype(np.float32), auc
 
 
@@ -970,8 +1259,17 @@ def main():
 
 
     # =========================
-    # IDENTIFICAÇÃO
+    # IDENTIFICAÇÃO (multiclasse)
     # =========================
+    # Objetivo: prever o ID (classe) de cada imagem.
+    # - Entrada: X_eval (features HOG previamente extraídas).
+    # - Saída do modelo: P (distribuição de probabilidade por classe) e y_pred (argmax).
+    # - Métrica principal: acurácia top-1; complementos: confusão, e AUC macro (one-vs-rest).
+    #
+    # Referências (fundamentos):
+    # - C. Bishop, *Pattern Recognition and Machine Learning* (classificação multiclasse).
+    # - T. Hastie, R. Tibshirani, J. Friedman, *The Elements of Statistical Learning*.
+    # - T. Fawcett, "An introduction to ROC analysis" (ROC/AUC), 2006.
     y_pred, P = predict_labels(X_eval, classes_modelo, modelo, inference_params)
     acc = accuracy(y_eval, y_pred)
     print("\n[IDENTIFICAÇÃO] Acurácia no conjunto de avaliação:")
@@ -999,8 +1297,25 @@ def main():
     )
 
     # =========================
-    # AUTENTICAÇÃO
+    # AUTENTICAÇÃO (verificação: same vs different)
     # =========================
+    # Objetivo: dado um par de imagens, decidir se pertencem ao MESMO ID.
+    # Estratégia: transformar cada imagem em uma representação e medir similaridade:
+    # - cosine em embeddings (vetores contínuos do penúltimo layer / representação interna)
+    # - prob_dot: dot entre distribuições P (afinidade entre posteriors)
+    # - id+conf: regra discreta (mesmo y_pred) + confiança (min(pmax)) >= threshold
+    #
+    # Implementação:
+    # 1) Extraímos embeddings e (opcionalmente) normalizamos para usar dot ≡ cosine.
+    # 2) Fazemos tuning de thresholds em um conjunto separado (y_tune).
+    # 3) Avaliamos em pares. Para N grande, amostramos pares para evitar O(N^2).
+    # 4) Calculamos AUC ROC em pares com algoritmo O(n log n) (roc_auc_fast), pois
+    #    enumerar todos os thresholds únicos não escala para centenas de milhares de pares.
+    #
+    # Referências (contexto de verificação por embeddings):
+    # - Schroff et al., "FaceNet" (embeddings + cosine para verificação), 2015.
+    # - Deng et al., "ArcFace" / Wang et al., "CosFace" (margens em espaço angular), 2018.
+    # - T. Fawcett, 2006 (ROC/AUC).
     print("\n[AUTH] Extraindo embeddings...")
     emb = extract_embeddings(X_eval, modelo, inference_params)
     pmax = np.max(P, axis=1).astype(np.float32, copy=False)
@@ -1074,30 +1389,124 @@ def main():
         res_prob = eval_auth_pairs_full_prob(P, y_eval, thr=float(thr_prob))
         res_conf = eval_auth_pairs_full_identity_confidence(y_pred=y_pred, pmax=pmax, y_true=y_eval,
                                                             thr_conf=float(thr_conf))
+
+        # AUC ROC em pares (amostrados) mesmo em modo "full"
+        # Motivo: AUC exige scores contínuos; calcular ROC/AUC em TODOS os pares O(N^2) pode ficar pesado.
+        # Aqui usamos a mesma amostragem controlada por `sample_pairs_if_large` * `pairs_fraction`.
+        base_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
+        frac_pairs = float(auth_cfg.get("pairs_fraction", 1.0))
+        frac_pairs = max(0.0, min(1.0, frac_pairs))
+        n_pairs_auc = int(round(base_pairs * frac_pairs))
+        if base_pairs > 0 and n_pairs_auc < 1:
+            n_pairs_auc = 1
+
+        if n_pairs_auc > 0:
+            ii_auc, jj_auc = _sample_pairs_uniform(n=int(n), rng=rng, n_pairs=int(n_pairs_auc))
+            truth_auc = (y_eval[ii_auc] == y_eval[jj_auc]).astype(np.int8)
+
+            sims_cos_auc = _pair_dot_scores_batched(emb, ii_auc, jj_auc, batch=50000, label="cosine(AUC)")
+            sims_prob_auc = _pair_dot_scores_batched(P, ii_auc, jj_auc, batch=50000, label="prob_dot(AUC)")
+
+            same_id_auc = (y_pred[ii_auc] == y_pred[jj_auc])
+            conf_auc = np.minimum(pmax[ii_auc], pmax[jj_auc]).astype(np.float32, copy=False)
+            score_conf_auc = (conf_auc * same_id_auc.astype(np.float32)).astype(np.float32, copy=False)
+
+            print("  [AUTH] ROC-AUC (autenticação): ordenando cosine(AUC)...")
+            auc_cos = roc_auc_fast(sims_cos_auc, truth_auc == 1)
+            print("  [AUTH] ROC-AUC (autenticação): ordenando prob_dot(AUC)...")
+            auc_prob = roc_auc_fast(sims_prob_auc, truth_auc == 1)
+            print("  [AUTH] ROC-AUC (autenticação): ordenando id+conf(AUC)...")
+            auc_conf = roc_auc_fast(score_conf_auc, truth_auc == 1)
+
+            print(f"  [AUTH] ROC-AUC (autenticação, same vs different, threshold-var; pares amostrados, n={int(ii_auc.size)}): "
+                  f"cosine={auc_cos:.4f} | prob_dot={auc_prob:.4f} | id+conf={auc_conf:.4f}")
     else:
-        res_cos = eval_auth_pairs_sample(emb, y_eval, thr=float(thr_cos), rng=rng,
-                                         n_pairs=int(auth_cfg.get("sample_pairs_if_large", 300000)))
+        # --- Amostragem de pares para N grande ---
+        # Em vez de avaliar todos os pares O(N^2), amostramos uma quantidade configurável.
+        # A nova flag `pairs_fraction` permite reduzir rapidamente o custo para prototipagem
+        # (ex.: 0.2 usa 20% de `sample_pairs_if_large`).
+        base_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
+        frac_pairs = float(auth_cfg.get("pairs_fraction", 1.0))
+        frac_pairs = max(0.0, min(1.0, frac_pairs))
+        n_pairs = int(round(base_pairs * frac_pairs))
+        if base_pairs > 0 and n_pairs < 1:
+            n_pairs = 1
 
-        n_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
-        ii_s, jj_s = _sample_pairs_uniform(n=int(n), rng=rng, n_pairs=int(n_pairs))
-        truth_s = (y_eval[ii_s] == y_eval[jj_s]).astype(np.int8)
+        if n_pairs <= 0:
+            res_cos = {"mode": "sample", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+            res_prob = {"mode": "sample", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+            res_conf = {"mode": "sample", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+        else:
+            ii_s, jj_s = _sample_pairs_uniform(n=int(n), rng=rng, n_pairs=int(n_pairs))
+            truth_s = (y_eval[ii_s] == y_eval[jj_s]).astype(np.int8)
 
-        sims_prob = np.sum(P[ii_s] * P[jj_s], axis=1).astype(np.float32, copy=False)
-        pred_prob = sims_prob >= float(thr_prob)
-        cm_prob = _binary_counts_from_pred_truth(pred_prob, truth_s == 1)
-        mets_prob = _binary_metrics_from_counts(cm_prob)
-        res_prob = {"mode": "sample", "pairs": int(ii_s.size), "TP": cm_prob["TP"], "TN": cm_prob["TN"],
-                    "FP": cm_prob["FP"], "FN": cm_prob["FN"], **{f"m_{k}": v for k, v in mets_prob.items()}}
+            # cosine similarity (dot em embeddings L2-normalizados ≡ cosine)
+            sims_cos = _pair_dot_scores_batched(emb, ii_s, jj_s, batch=50000, label="cosine")
+            pred_cos = sims_cos >= float(thr_cos)
+            cm_cos_s = _binary_counts_from_pred_truth(pred_cos, truth_s == 1)
+            mets_cos_s = _binary_metrics_from_counts(cm_cos_s)
+            res_cos = {"mode": "sample", "pairs": int(ii_s.size),
+                       "TP": cm_cos_s["TP"], "TN": cm_cos_s["TN"], "FP": cm_cos_s["FP"], "FN": cm_cos_s["FN"],
+                       **{f"m_{k}": v for k, v in mets_cos_s.items()}}
 
-        same_id = (y_pred[ii_s] == y_pred[jj_s])
-        conf_s = np.minimum(pmax[ii_s], pmax[jj_s])
-        pred_conf = same_id & (conf_s >= float(thr_conf))
-        cm_conf = _binary_counts_from_pred_truth(pred_conf, truth_s == 1)
-        mets_conf = _binary_metrics_from_counts(cm_conf)
-        res_conf = {"mode": "sample", "pairs": int(ii_s.size), "TP": cm_conf["TP"], "TN": cm_conf["TN"],
-                    "FP": cm_conf["FP"], "FN": cm_conf["FN"], **{f"m_{k}": v for k, v in mets_conf.items()}}
+            # prob_dot: dot entre vetores de probas por classe (interpretação: "afinidade" de distribuição)
+            sims_prob = _pair_dot_scores_batched(P, ii_s, jj_s, batch=50000, label="prob_dot")
+            pred_prob = sims_prob >= float(thr_prob)
+            cm_prob = _binary_counts_from_pred_truth(pred_prob, truth_s == 1)
+            mets_prob = _binary_metrics_from_counts(cm_prob)
+            res_prob = {"mode": "sample", "pairs": int(ii_s.size),
+                        "TP": cm_prob["TP"], "TN": cm_prob["TN"], "FP": cm_prob["FP"], "FN": cm_prob["FN"],
+                        **{f"m_{k}": v for k, v in mets_prob.items()}}
 
-    # imprime resultados (métricas além de acurácia)
+            # id+conf: mesmo ID predito E confiança conjunta >= thr_conf
+            same_id = (y_pred[ii_s] == y_pred[jj_s])
+            conf_s = np.minimum(pmax[ii_s], pmax[jj_s]).astype(np.float32, copy=False)
+            pred_conf = same_id & (conf_s >= float(thr_conf))
+            cm_conf = _binary_counts_from_pred_truth(pred_conf, truth_s == 1)
+            mets_conf = _binary_metrics_from_counts(cm_conf)
+            res_conf = {"mode": "sample", "pairs": int(ii_s.size),
+                        "TP": cm_conf["TP"], "TN": cm_conf["TN"], "FP": cm_conf["FP"], "FN": cm_conf["FN"],
+                        **{f"m_{k}": v for k, v in mets_conf.items()}}
+
+            # AUC ROC em pares (com tracker de progresso no cálculo de scores acima)
+            # Atenção: para ROC, usamos scores contínuos (não binarizados pelo threshold).
+            score_conf = (conf_s * same_id.astype(np.float32)).astype(np.float32, copy=False)
+            print("  [AUTH] ROC-AUC (autenticação): ordenando cosine...")
+            auc_cos = roc_auc_fast(sims_cos, truth_s == 1)
+            print("  [AUTH] ROC-AUC (autenticação): ordenando prob_dot...")
+            auc_prob = roc_auc_fast(sims_prob, truth_s == 1)
+            print("  [AUTH] ROC-AUC (autenticação): ordenando id+conf...")
+            auc_conf = roc_auc_fast(score_conf, truth_s == 1)
+            print(f"  [AUTH] ROC-AUC (autenticação, same vs different, threshold-var; pares amostrados, n={int(ii_s.size)}): "
+                  f"cosine={auc_cos:.4f} | prob_dot={auc_prob:.4f} | id+conf={auc_conf:.4f}")
+
+    # ------------------------------------------------------------
+    # Macro AUC (AUTENTICAÇÃO) por identidade: média simples dos AUCs por classe
+    # (equivalente ao seu "AUC composto" = mean(AUC one-vs-all) em autenticação)
+    # ------------------------------------------------------------
+    macro_auth_cfg = (auth_cfg.get("macro_auc", {}) or {})
+    if bool(macro_auth_cfg.get("enable", False)):
+        print("\n[AUTH] Macro ROC-AUC por identidade (one-vs-all, mesma identidade vs outras):")
+        macro_res = auth_macro_auc_per_identity(
+            emb=emb,
+            P=P,
+            y_true=y_eval,
+            y_pred=y_pred,
+            pmax=pmax,
+            rng=rng,
+            cfg=macro_auth_cfg,
+        )
+        if macro_res.get("n_classes_used", 0) > 0:
+            print(
+                f"  [AUTH] Macro ROC-AUC (média simples em {macro_res['n_classes_used']} classes): "
+                f"cosine={macro_res['cos_mean']:.4f} (mediana={macro_res['cos_median']:.4f}) | "
+                f"prob_dot={macro_res['prob_mean']:.4f} (mediana={macro_res['prob_median']:.4f}) | "
+                f"id+conf={macro_res['conf_mean']:.4f} (mediana={macro_res['conf_median']:.4f})"
+            )
+        else:
+            print("  [AUTH] Macro ROC-AUC: não há classes suficientes (precisa >=2 amostras por classe).")
+
+# imprime resultados (métricas além de acurácia)
     cm_cos = {"TP": int(res_cos.get("TP", 0)), "TN": int(res_cos.get("TN", 0)), "FP": int(res_cos.get("FP", 0)),
               "FN": int(res_cos.get("FN", 0))}
     mets_cos = _binary_metrics_from_counts(cm_cos)
@@ -1154,17 +1563,35 @@ def main():
     if bool(macro_auc_cfg.get("enable", True)):
         classes_for_auc = np.unique(y_eval).astype(np.int64, copy=False)
         aucs = []
-        for c in classes_for_auc.tolist():
+        use_fast = bool(macro_auc_cfg.get("use_fast_auc", True))
+        prog_every = int(macro_auc_cfg.get("progress_every", 50))
+        prog_every = max(0, prog_every)
+        t0_auc = time.time()
+        C = int(classes_for_auc.size)
+        for ci, c in enumerate(classes_for_auc.tolist(), start=1):
+            if prog_every > 0 and (ci == 1 or (ci % prog_every) == 0 or ci == C):
+                elapsed = time.time() - t0_auc
+                rate = (ci / elapsed) if elapsed > 0 else 0.0
+                eta = ((C - ci) / rate) if rate > 0 else float('nan')
+                print(f"[IDENTIFICAÇÃO] Macro AUC OVR: {ci}/{C} | elapsed={elapsed:.1f}s | ETA~{eta:.1f}s")
+
             idx_k = np.where(classes_modelo == int(c))[0]
             if idx_k.size == 0:
                 continue
             k = int(idx_k[0])
             scores = P[:, k]
             truth = (y_eval == int(c)).astype(np.int8)
-            fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
-            if np.isnan(auc) or fpr.size == 0:
-                continue
-            aucs.append(float(auc))
+
+            if use_fast:
+                auc = roc_auc_fast(scores, truth == 1)
+                if np.isnan(auc):
+                    continue
+                aucs.append(float(auc))
+            else:
+                fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
+                if np.isnan(auc) or fpr.size == 0:
+                    continue
+                aucs.append(float(auc))
 
         if len(aucs) == 0:
             print("\n[IDENTIFICAÇÃO] Macro AUC (one-vs-rest): não foi possível calcular (sem curvas válidas).")
