@@ -509,7 +509,8 @@ def matriz_confusao_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
 # CV: combos L1/L2
 # ============================================================
 
-#
+#  Referência algos treino e CV: R. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” Proc. IJCAI, 1995
+
 
 def montar_combos_l1_l2(grid_l1, grid_l2, max_combos: int, strategy: str, seed: int):
     grid_l1 = [float(x) for x in grid_l1]
@@ -690,7 +691,7 @@ def main():
         print(f"[Aviso] cv_frac implica alvo~{target}, mas mínimo por classe exige >= {min_needed}. "
               f"O CV vai usar pelo menos {min_needed} amostras. Para acelerar: reduza frac_classes ou use cv_max_classes.")
 
-    # 6) CV grid-search (8 combos)
+    # 6) CV grid-search
     print(f"\n[Etapa 6] CV grid-search | epochs_cv={CONFIG['epochs_cv']} batch_size_cv={CONFIG['batch_size_cv']}")
     (best_l1, best_l2), best_acc, alpha_med = escolher_melhores_lambdas_por_cv(
         X_cv=X_cv,
@@ -748,7 +749,7 @@ def main():
 
 
     # ============================================================
-    # SAVE (modelo + classes + normalização) - ADICIONADO
+    # SAVE (modelo + classes + normalização)
     # ============================================================
     out_dir = (Path(__file__).resolve().parent
                if "__file__" in globals() else Path.cwd())
