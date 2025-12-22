@@ -1378,6 +1378,82 @@ def escolher_melhor_l2_por_cv(X: np.ndarray, y: np.ndarray, seed: int):
     # Mantemos o retorno compatível com o main: (best_l2, best_dropout, best_mean_acc)
     return float(melhor["l2"]), float(melhor["dp"]), float(melhor["mean_acc"])
 
+# ============================================================
+# SNIPPET: salvar config/erro do MLP em TXT (colar no final)
+# ============================================================
+
+def _fmt_value(v, max_len: int = 300) -> str:
+    """Formata valores (incluindo numpy) sem explodir o tamanho do arquivo."""
+    try:
+        import numpy as _np
+        if isinstance(v, _np.ndarray):
+            return f"ndarray(shape={tuple(v.shape)}, dtype={v.dtype})"
+        if isinstance(v, (_np.floating, _np.integer)):
+            return repr(v.item())
+    except Exception:
+        pass
+
+    s = repr(v)
+    if len(s) > max_len:
+        s = s[:max_len] + " ... (truncado)"
+    return s
+
+
+def salvar_config_mlp_txt(
+    out_dir: Path,
+    config: dict,
+    best_hparams: dict,
+    treino_stats: dict | None = None,
+    filename: str = "config_mlp.txt",
+) -> Path:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / filename
+
+    lines = []
+    lines.append("=== CONFIG (snapshot) ===")
+    for k in sorted(config.keys()):
+        lines.append(f"{k} = {_fmt_value(config[k])}")
+
+    lines.append("")
+    lines.append("=== HIPERPARÂMETROS FINAIS (selecionados) ===")
+    for k in sorted(best_hparams.keys()):
+        lines.append(f"{k} = {_fmt_value(best_hparams[k])}")
+
+    if treino_stats:
+        lines.append("")
+        lines.append("=== STATS DO TREINO FINAL (modelo['stats']) ===")
+        for k in sorted(treino_stats.keys()):
+            lines.append(f"{k} = {_fmt_value(treino_stats[k])}")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def salvar_erro_mlp_txt(
+    out_dir: Path,
+    acc_train: float,
+    acc_test: float,
+    filename: str = "erro_mlp.txt",
+    extra: dict | None = None,
+) -> Path:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / filename
+
+    lines = []
+    lines.append("=== ERRO / ACURÁCIA FINAL ===")
+    lines.append(f"acc_train = {float(acc_train):.6f}")
+    lines.append(f"acc_test  = {float(acc_test):.6f}")
+
+    if extra:
+        lines.append("")
+        lines.append("=== EXTRA ===")
+        for k in sorted(extra.keys()):
+            lines.append(f"{k} = {_fmt_value(extra[k])}")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def main():
@@ -1595,6 +1671,9 @@ def main():
     print(f"[SAVE] Modelo + classes salvos em: {save_path}")
 
 
+    best_hparams = {"l2": float(best_l2), "dropout": float(best_dropout)}
+    salvar_config_mlp_txt(out_dir, CONFIG, best_hparams, treino_stats=modelo.get("stats", None))
+    salvar_erro_mlp_txt(out_dir, acc_tr, acc_te)
 
 if __name__ == "__main__":
     main()
