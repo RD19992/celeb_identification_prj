@@ -26,7 +26,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # seleção de classes (prototipagem)
-    "frac_classes": 0.05,
+    "frac_classes": 1.00,
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
 
@@ -65,7 +65,7 @@ CONFIG = {
     # Padronização para saída do HOG (para estabildiade numérica)
     "eps_std": 1e-6,
 
-    # Grig para busca de elastic net (usamos para regularização dado tendência muito forte a overfit no treino)
+    # Grid para busca de elastic net (usamos para regularização dado tendência muito forte a overfit no treino)
     "grid_l1": [0.0, 1e-4, 3e-4, 1e-3],
     "grid_l2": [0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1],
     "max_combos_cv": 16,

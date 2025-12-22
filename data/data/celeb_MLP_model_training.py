@@ -17,13 +17,13 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split, StratifiedKFold, StratifiedShuffleSplit
 
 # ============================================================
-# CONFIG (ajuste aqui)
+# CONFIGURAÇÃO DE PARÂMETROS DE EXECUÇÃO E MODELAGEM
 # ============================================================
 
 CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
-    # seleção de classes (prototipagem)
+    # seleção de classes (para prototipagem e 100% para modelo final)
     "frac_classes": 0.01,  # ex.: 0.20 (20% das classes elegíveis)
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
@@ -38,10 +38,8 @@ CONFIG = {
     # -----------------
     "k_folds": 5,
     "cv_frac": 0.30,  # 30% classes para CV
-    # [MELHORIA 6] mínimo por classe no CV deve ser bem maior que k para ser informativo.
-    # Sugestão: 5*k (ex.: 25) ou 20, o que for maior.
     "cv_min_por_classe": None,  # None -> usa max(5*k_folds, 20)
-    "cv_max_classes": 500,  # opcional: limita #classes no CV (acelera MUITO), mantendo min/cls alto
+    "cv_max_classes": None,  # opcional: limita #classes no CV (para mais velocidade no CV), mantendo min/cls alto
 
     # treino final
     "final_frac": 1.00,
@@ -50,44 +48,44 @@ CONFIG = {
     # -----------------
     # MLP (1 hidden layer)
     # -----------------
-    "hidden_units": 128,
+    "hidden_units": 128, # número de neurônios na hidden layer. 8 dá underifit, mais de 128 não deu ganho
     "act_hidden": "relu",  # "relu" ou "tanh"
     "act_output": "cosine_softmax",
 
-    # Cosine-softmax (normalização cosseno) - útil com muitas classes
+    # Cosine-softmax (normalização cosseno) - usamos para estabilizar numericamente função de ativação
     "cosine_softmax_scale": 20.0,
     "cosine_softmax_eps": 1e-8,
     "cosine_softmax_use_bias": False,
 
-    # [CORREÇÃO 4] Dropout menor por padrão
+    # Configuração do dropout - para reduzir overfit
     "dropout_hidden_p": 0.10,
     # Grid de dropout (otimizado no CV)
     "grid_dropout": [0.05, 0.10, 0.15],
     # 0.0 desliga
 
-    # [CORREÇÃO 5] LayerNorm treinável antes da ativação (ajuda estabilidade)
+    # LayerNorm treinável antes da ativação (ajuda estabilidade)
     "use_layernorm": True,
     "layernorm_eps": 1e-5,
 
-    # inicialização
+    # inicialização de pesos
     "use_he_xavier_init": True,  # ReLU->He, tanh->Xavier
     "w_init_scale": 0.01,  # fallback
 
     # -----------------
     # Regularização / loss
     # -----------------
-    # [CORREÇÃO 3] Label smoothing reduz colapso de confiança
+    # Label smoothing reduz colapso de confiança
     "label_smoothing": 0.05,  # 0.0 desliga
-    # [CORREÇÃO 3] Grid L2 maior (principalmente em escala)
+    # Grid de valores de L2 testados no CV
     "grid_l2": [0.0, 0.1, 0.3, 1.0],
 
-    # [CORREÇÃO 3] Max-Norm (opcional; ajuda contra explosões e overfit)
+    # Max-Norm (opcional; ajuda contra explosões e overfit)
     "maxnorm_enabled": True,
     "maxnorm_W1": 3.0,  # None desliga
     "maxnorm_W2": 3.0,  # None desliga
 
     # -----------------
-    # Treinamento
+    # Épocas para Treinamento
     # -----------------
     "epochs_cv": 10,
     "epochs_final": 120,
@@ -95,17 +93,17 @@ CONFIG = {
     "batch_size_cv": 128,
     "batch_size_final": 128,
 
-    # Gaussian noise (somente no treino; X já é padronizado)
+    # Gaussian noise (somente no treino para combater overfit)
     "gaussian_noise_std": 0.01,  # ex.: 0.01; 0.0 desliga
 
     # batches quase-balanceados (gera uma permutação que intercalada classes)
     "use_almost_balanced_batches": True,
-    # [CORREÇÃO 2] Momentum
+    # Momentum para taxa de aprendizado empacada
     "use_momentum": True,
     "momentum_beta": 0.90,
     "use_nesterov": False,
 
-    # [CORREÇÃO 1] LR schedule (warmup + teto + decaimento)
+    # Schedule de taxa de aprendizado (warmup + teto + decaimento)
     "lr_base": 0.3,  # LR após warmup
     "lr_min": 1e-4,
     "lr_warmup_epochs": 5,
