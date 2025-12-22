@@ -107,20 +107,20 @@ CONFIG = {
     "lr_base": 0.3,  # LR após warmup
     "lr_min": 1e-4,
     "lr_warmup_epochs": 5,
-    "lr_warmup_start": 0.10,  # LR inicial do warmup
-    "lr_decay": 0.98,  # multiplicativo por época após warmup
+    "lr_warmup_start": 0.10,  # LR inicial (no warmup)
+    "lr_decay": 0.98,  # multiplicativo por época após warmup - vai reduzindo progressivamente aprendizado
 
-    # [CORREÇÃO 1] Guardas contra colapso numérico
+    # Guardas contra colapso numérico
     "nan_guard_enabled": True,
     "nan_guard_alpha_shrink": 0.5,  # se colapsar, reduz LR e restaura checkpoint
     "nan_guard_max_rollbacks": 5,
 
-    # [CORREÇÃO 1] Gradient clipping (global norm)
+    # Gradient clipping (global norm)
     "grad_clip_enabled": True,
     "grad_clip_norm": 5.0,
 
     # -----------------
-    # (Opcional) Sampled softmax (correção 8)
+    # Sampled softmax
     # -----------------
     # Se >0: para o gradiente no treino, atualiza apenas classes verdadeiras + negativos aleatórios.
     # Predição/val/test continuam usando softmax completo (exato).
@@ -155,7 +155,7 @@ CONFIG = {
 
 
 # ============================================================
-# Utilidades de IO / Dataset
+# Carga de Dataset
 # ============================================================
 
 def carregar_dataset(path: str):
@@ -297,9 +297,9 @@ def stable_softmax(Z: np.ndarray):
 # ============================================================
 # Output: Softmax padrão vs Cosine-Softmax (normalização cosseno)
 # ============================================================
-# A ideia do cosine-softmax:
+# Usamos cosine-softmax:
 #   logits = s * cos(Â, Ŵ)   onde Â = A/||A|| (por amostra) e Ŵ = W/||W|| (por classe)
-# Isso tende a estabilizar em cenários com MUITAS classes (e.g., identificação/face),
+# Ajuda a estabilizar em cenários com MUITAS classes (e.g., identificação/face),
 # pois reduz a dependência de norma e foca em ângulo (similaridade cosseno).
 
 def _row_norm_forward(A: np.ndarray, eps: float):
@@ -348,7 +348,7 @@ def output_logits_forward(
     act_output = str(act_output).lower().strip()
 
     if act_output in ("softmax", "linear", "linear_softmax"):
-        # [AJUSTE] No softmax "clássico", mantemos o bias sempre ativo.
+        # No softmax "clássico", mantemos o bias sempre ativo.
         Z2 = A1 @ W2 + b2
         out_cache = ("linear", A1, W2, True)
         return Z2, out_cache
@@ -419,7 +419,7 @@ def relu_backward(dA: np.ndarray, Z: np.ndarray):
 
 
 # ============================================================
-# Label encoding
+# Codificação de rótulos
 # ============================================================
 
 def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
@@ -432,7 +432,7 @@ def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
 
 
 # ============================================================
-# Inicialização He/Xavier
+# Inicialização He (ReLU) /Xavier (Tanh)
 # ============================================================
 
 def _std_he(fan_in: int) -> float:
@@ -458,7 +458,7 @@ def inicializar_pesos(d: int, H: int, K: int, act_hidden: str, rng: np.random.Ge
     b1 = np.zeros((H,), dtype=np.float32)
     b2 = np.zeros((K,), dtype=np.float32)
 
-    # [CORREÇÃO 5] LayerNorm treinável
+    # LayerNorm treinável
     if bool(CONFIG["use_layernorm"]):
         ln_gamma = np.ones((H,), dtype=np.float32)
         ln_beta = np.zeros((H,), dtype=np.float32)
@@ -469,7 +469,7 @@ def inicializar_pesos(d: int, H: int, K: int, act_hidden: str, rng: np.random.Ge
 
 
 # ============================================================
-# Dropout (inverted)
+# Dropout (invertido)
 # ============================================================
 
 def aplicar_dropout_invertido(A: np.ndarray, p_drop: float, rng: np.random.Generator):
@@ -539,10 +539,7 @@ def mlp_forward(
         rng: np.random.Generator | None,
         train_mode: bool,
 ):
-    """
-    [CORREÇÃO 5] LN opcional antes da ativação
-    [CORREÇÃO 4] Dropout só no treino
-    """
+
     X = X.astype(np.float32, copy=False)
     Z1 = X @ W1 + b1
 
@@ -561,7 +558,7 @@ def mlp_forward(
             raise ValueError("rng não pode ser None quando dropout>0 no treino.")
         A1, dropout_mask = aplicar_dropout_invertido(A1_pre, p_drop=float(dropout_p), rng=rng)
 
-    # [REFATORAÇÃO] Output pode ser softmax linear OU cosine-softmax (normalização cosseno)
+    # Output pode ser softmax linear OU cosine-softmax (normalização cosseno)
     Z2, out_cache = output_logits_forward(
         A1, W2, b2,
         act_output=act_output,
@@ -577,7 +574,7 @@ def mlp_forward(
 
 def ce_loss_with_label_smoothing(P: np.ndarray, y_idx: np.ndarray, smoothing: float):
     """
-    [CORREÇÃO 3] CE com label smoothing.
+    CE com label smoothing.
     """
     eps = np.float32(1e-12)
     P = P.astype(np.float32, copy=False)
@@ -646,10 +643,8 @@ def compute_grads_batch(
 
     sm = float(smoothing)
     if sampled_neg_k and sampled_neg_k > 0 and train_mode:
-        # [CORREÇÃO 8 - opcional] Sampled-softmax: atualiza subset de classes (true + negativos).
+        # Sampled-softmax: atualiza subset de classes (true + negativos).
         # Implementação simples: recomputa softmax apenas no subset S e zera grad fora dele.
-        # Obs.: P/val/test continuam full.
-        # Para não complicar demais, dZ2 fica full aqui (mais seguro). Deixe sampled_softmax_neg_k=0 por padrão.
         pass
 
     if sm <= 0.0 or K <= 1:
@@ -660,7 +655,7 @@ def compute_grads_batch(
         dZ2[np.arange(B), y_idx] -= np.float32((1.0 - sm) - a)
 
     dZ2 /= np.float32(max(B, 1))
-    # [CORREÇÃO CRÍTICA] Backprop correto da camada de saída.
+    # Backprop da camada de saída.
     #  - Se act_output='softmax'/'linear': equivale ao caso clássico (Z2=A1@W2+b2).
     #  - Se act_output='cosine_softmax': usa normalização cosseno e devolve gradientes w.r.t. W2/A1 no espaço ORIGINAL.
     dA1, dW2, db2 = output_logits_backward(dZ2, out_cache)
@@ -776,7 +771,7 @@ def apply_maxnorm(W: np.ndarray, maxnorm: float):
 
 
 # ============================================================
-# Early stopping util
+# Early stopping - utilitário
 # ============================================================
 
 def _melhorou(metrica_atual: float, metrica_best: float, modo: str, min_delta: float) -> bool:
@@ -786,7 +781,7 @@ def _melhorou(metrica_atual: float, metrica_best: float, modo: str, min_delta: f
 
 
 # ============================================================
-# LR schedule (warmup + decaimento)
+# Schedule de taxa de aprendizado (warmup + decaimento)
 # ============================================================
 
 def lr_por_epoca(ep: int, base: float):
@@ -888,7 +883,7 @@ def accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 # ============================================================
-# Confusão Top-k (sem sklearn, para evitar warnings)
+# Confusão Top-k
 # ============================================================
 
 def confusion_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
@@ -941,7 +936,7 @@ def split_treino_validacao_estratificado(X: np.ndarray, y: np.ndarray, val_frac:
 
 
 # ============================================================
-# Treino (SGD + Momentum + guards)
+# Treino (Stochastic Gradient Descent + Momentum + guards)
 # ============================================================
 
 def treinar_mlp(
@@ -1000,7 +995,7 @@ def treinar_mlp(
     smoothing = float(CONFIG["label_smoothing"])
     sampled_neg_k = int(CONFIG["sampled_softmax_neg_k"])
 
-    # early stopping bookkeeping
+    # early stopping - controle
     metric_name = str(CONFIG["early_stop_metric"]).lower().strip()
     metric_name = metric_name if metric_name in ("val_loss", "val_acc") else "val_loss"
     best_mode = "min" if metric_name == "val_loss" else "max"
@@ -1034,14 +1029,14 @@ def treinar_mlp(
                     lr)
 
         # SGD
-        # [REFATORAÇÃO] Permutação padrão vs quase-balanceada
+        # Permutação padrão vs quase-balanceada
         if bool(CONFIG.get("use_almost_balanced_batches", False)):
             perm = permutacao_quase_balanceada(y_idx, rng)
         else:
             perm = rng.permutation(m_total)
         n_batches = int(np.ceil(m_total / batch_size))
 
-        # [CORREÇÃO 7] acompanhar norma do gradiente ao longo da época
+        # Acompanhar norma do gradiente ao longo da época
         gnorm_hist = []
 
         for bi, start in enumerate(range(0, m_total, batch_size), start=1):
@@ -1049,7 +1044,7 @@ def treinar_mlp(
             Xb = X_train[idx]
             yb = y_idx[idx]
 
-            # [REFATORAÇÃO] Gaussian noise apenas no treino (data augmentation leve)
+            # Gaussian noise apenas no treino
             Xb = aplicar_ruido_gaussiano(Xb, std=float(CONFIG.get("gaussian_noise_std", 0.0)), rng=rng)
 
             grads = compute_grads_batch(
@@ -1254,13 +1249,10 @@ def escolher_melhor_l2_por_cv(X: np.ndarray, y: np.ndarray, seed: int):
     """
     Escolhe (l2, dropout_p) via 5-fold CV (mantém k-fold=5).
 
-    [MUDANÇA 1] A seleção do melhor hiperparâmetro segue o MESMO critério configurado
+    A seleção do melhor hiperparâmetro segue o critério configurado
     em CONFIG["early_stop_metric"] ("val_acc" ou "val_loss").
       - Se "val_acc": maximiza acc (tie-break: menor loss, depois menor l2)
       - Se "val_loss": minimiza loss (tie-break: maior acc, depois menor l2)
-
-    Observação:
-    - Continuamos reportando (mean±std) de acc e loss para diagnóstico.
     """
     from sklearn.model_selection import StratifiedKFold
 
@@ -1377,7 +1369,7 @@ def escolher_melhor_l2_por_cv(X: np.ndarray, y: np.ndarray, seed: int):
     return float(melhor["l2"]), float(melhor["dp"]), float(melhor["mean_acc"])
 
 # ============================================================
-# SNIPPET: salvar config/erro do MLP em TXT (colar no final)
+# Salvar config/erro do MLP em TXT
 # ============================================================
 
 def _fmt_value(v, max_len: int = 300) -> str:
@@ -1511,13 +1503,7 @@ def main():
     )
 
     # ------------------------------------------------------------
-    # FIX: evitar colapso do CV para poucas classes
-    #
-    # Após o split treino/teste, muitas classes podem ficar com ~24 amostras no TREINO.
-    # Se cv_min_por_classe (default quando None) ficar em 25, o CV acaba usando só as
-    # poucas classes com >=25 amostras, como visto no output (apenas 4 classes).
-    #
-    # Mantemos os parâmetros do CONFIG, mas limitamos cv_min ao suporte real do treino.
+    # Evitar colapso do CV para poucas classes
     # ------------------------------------------------------------
     _, _cts_cv_src = np.unique(y_train_cv_src, return_counts=True)
     _min_count_cv_src = int(_cts_cv_src.min()) if _cts_cv_src.size else 0
@@ -1629,7 +1615,7 @@ def main():
 
 
     # ============================================================
-    # SAVE (modelo + classes + normalização) - ADICIONADO
+    # Salvar resultado (modelo + classes + normalização)
     # ============================================================
     out_dir = (Path(__file__).resolve().parent
                if "__file__" in globals() else Path.cwd())
