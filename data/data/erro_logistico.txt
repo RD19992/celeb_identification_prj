@@ -1,0 +1,8 @@
+generated_at: 2025-12-22T01:31:01
+model_kind: logistic_regression_softmax_elasticnet_sgd
+best_hparams: {'l1': 0.001, 'l2': 1.0}
+cv_info: {'mean_acc_cv': 0.06895874263261297, 'alpha_med': 2.0}
+
+FINAL ACCURACY
+train_acc (final sample): 0.999652
+test_acc:                0.327307

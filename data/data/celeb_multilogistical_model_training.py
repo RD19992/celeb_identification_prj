@@ -1,130 +1,148 @@
+
 # -*- coding: utf-8 -*-
 """
 EACH_USP: SIN-5016 - Aprendizado de Máquina
 Laura Silva Pelicer
 Renan Rios Diniz
 
-Código de treinamento de modelo a partir de arquivo extraído de processo HOG
-Treina o Modelo, avalia e salva resultados
-Regressão Logística (Softmax) Multinomial
+Código de avaliação de modelo com tarefas de identificação e autenticação
+Consome payload salvo pelo treino (joblib)
+Regressão Logística Multinomial (softmax) sobre features HOG
+
+Notas:
+- Identificação (multiclasse): prever o ID/classe de cada imagem.
+  Métricas típicas: acurácia top-1; AUC ROC macro (one-vs-rest) para referência.
+- Autenticação / verificação (binário): decidir se um par de imagens é da mesma identidade.
+  O threshold é ajustado em X_tune/y_tune (anti-leakage) e avaliamos em X_eval/y_eval.
 """
 
 from __future__ import annotations
 
+import sys
+import math
+import time
 import joblib
 import numpy as np
 from pathlib import Path
-from sklearn.model_selection import train_test_split, StratifiedKFold, StratifiedShuffleSplit
-from sklearn.metrics import confusion_matrix
+from typing import Any, Dict, Optional, Tuple
+
+from sklearn.model_selection import train_test_split
 
 
 # ============================================================
-# CONFIGURAÇÃO DE PARÂMETROS DE EXECUÇÃO E MODELAGEM
+# CONFIGURAÇÕES
 # ============================================================
 
-CONFIG = {
-    "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
+SCRIPT_CONFIG = {
+    # nome do arquivo salvo pelo script de treino (na mesma pasta)
+    "model_payload_file": "logreg_pm_model_and_classes.joblib",
 
-    # seleção de classes (prototipagem)
-    "frac_classes": 1.00,
-    "seed_classes": 42,
-    "min_amostras_por_classe": 25,
+    # se quiser sobrescrever o caminho do joblib HOG/dataset (senão usa config_snapshot do payload)
+    "dataset_path_override": None,  # ex.: r"C:\\...\\celeba_hog_128x128_o9.joblib"
 
-    # split treino/teste
-    "test_frac": 0.20,
-    "seed_split": 42,
-    "min_train_por_classe": 5,  # pós split
+    # aleatoriedade local deste script (não altera o split do treino, só prints/amostragens)
+    "seed": 123,
 
-    # CV
-    "k_folds": 5,
-    "cv_frac": 0.10,
-    "cv_min_por_classe": None,    # se None -> usa k_folds
-    "cv_max_classes": None,       # opcional: limita nº de classes usadas no CV (parâmetro que usamos para acelerar treinamento)
+    # identificação
+    "one_vs_all_n_classes": 10,
 
-    # treino final
-    "final_frac": 1.00,
-    "final_min_por_classe": 1,
+    # ROC one-vs-all para as 10 classes escolhidas acima
+    "roc": {
+        "enable": True,
+        "save_png": True,
+        "show_plots": True,
+        "png_name": "roc_ova_10classes_logreg.png",
+    },
 
-    # treinamento (épocas para CV e treino final)
-    "epochs_cv": 20,
-    "epochs_final": 150,
+    # AUC macro (one-vs-rest) para todas as classes (ativar/desativar)
+    "macro_auc": {
+        "enable": True,
+        "use_fast_auc": True,
+        "progress_every": 200,
+    },
 
-    # minibatch
-    "batch_size_cv": 1024,
-    "batch_size_final": 2048,
+    # autenticação
+    "auth": {
+        "tune_metric": "f1",  # "f1" | "balanced_acc" | "acc"
 
-    # Armijo (parâmetros de configuração por época, usando probe batch)
-    "armijo_alpha0": 2.0,
-    "armijo_growth": 1.25,
-    "armijo_beta": 0.5,
-    "armijo_c1": 1e-4,
-    "armijo_max_backtracks": 12,
-    "armijo_alpha_min": 1e-6,
-    "armijo_probe_batch": 2048,
+        # tuning do threshold (amostragem):
+        "pos_pairs_per_class": 50,     # tenta gerar até isso por classe (se houver amostras)
+        "neg_pairs_total": 20000,      # negativos totais para tuning
+        "threshold_grid_q": 401,       # quantis para varrer threshold (>=101 recomendado)
 
-    # Padronização para saída do HOG (para estabildiade numérica)
-    "eps_std": 1e-6,
+        # avaliação em pares:
+        # modo "auto": se N for pequeno faz "full"; caso contrário faz "sample"
+        "eval_mode": "auto",              # "auto" | "full" | "sample"
+        "full_if_n_leq": 2500,            # se N <= isso, tenta full (O(N^2))
+        "sample_pairs_if_large": 300000,  # #pares amostrados se N grande
 
-    # Grid para busca de elastic net (usamos para regularização dado tendência muito forte a overfit no treino)
-    "grid_l1": [0.0, 1e-4, 3e-4, 1e-3],
-    "grid_l2": [0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1],
-    "max_combos_cv": 16,
-    "seed_combos_cv": 42,
-    "combo_strategy_cv": "cover",  # cover|random
+        # fração dos pares a avaliar (1.0 = usa tudo; <1.0 acelera prototipagem)
+        "pairs_fraction": 1.0,
 
-    # logs / debug
-    "print_every_batches": 25,
-    "loss_subsample_max": 2000,
-    "n_exemplos_previsao": 12,
-    "top_k_confusao": 10,
+        # Macro ROC-AUC por identidade (one-vs-all) - usa pares por classe/identidade
+        "macro_auc": {
+            "enable": True,
+            "pos_pairs_per_class": 30,
+            "neg_pairs_per_class": 60,
+            "classes_fraction": 1.0,
+            "max_classes": 0,
+            "progress_every": 100,
+        },
 
-    # ============================================================
-    # EARLY STOPPING ÉPOCAS - CONFIGS SEPARADOS PARA CV E FINAL
-    # ============================================================
+        # matrizes por âncora
+        "n_anchor_images": 10,
+    },
 
-    # CV early stopping (dentro de cada fold)
-    "earlystop_cv_enable": True,
-    "earlystop_cv_metric": "val_acc",   # "val_acc" ou "val_loss"
-    "earlystop_cv_warmup": 3,           # nº de épocas mínimas antes de começar a contar paciência
-    "earlystop_cv_patience": 5,         # nº de épocas sem melhora antes de parar
-    "earlystop_cv_min_delta": 0.0,      # melhora mínima para resetar paciência
-    "earlystop_cv_restore_best": True,  # restaura W/b do melhor epoch
-    "earlystop_cv_val_max": None,       # opcional: subsample fixo do val para monitoramento (int ou None)
-
-    # Final early stopping
-    "earlystop_final_enable": True,
-    "earlystop_final_metric": "val_acc",  # "val_acc" ou "val_loss"
-    "earlystop_final_warmup": 10,
-    "earlystop_final_patience": 12,
-    "earlystop_final_min_delta": 0.0,
-    "earlystop_final_restore_best": True,
-    "earlystop_final_monitor_frac": 0.10,   # fração do treino final para monitoramento
-    "earlystop_final_monitor_max": 20000,   # teto de tamanho do monitor
-    "earlystop_final_monitor_seed": 4242,   # seed do monitor (fixa o subconjunto)
+    # modo interativo (input)
+    "enable_interactive_queries": False,
 }
 
 
 # ============================================================
-# CARGA DOS DADOS HOG
+# IO DO DATASET (HOG joblib)
 # ============================================================
 
-def carregar_dataset(path: str):
+def carregar_dataset_joblib(path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Aceita:
+      - dict com chaves 'X' e 'y' (e possivelmente paths/meta)
+      - tupla/lista (X, y)
+    Retorna (X, y, meta)
+    """
     obj = joblib.load(path)
+    meta: Dict[str, Any] = {}
+
     if isinstance(obj, dict) and "X" in obj and "y" in obj:
-        X, y = obj["X"], obj["y"]
+        X = obj["X"]
+        y = obj["y"]
+
+        # tenta achar paths/ids (opcional)
+        for k in ("paths", "img_paths", "image_paths", "filenames", "files", "imgs", "img_files"):
+            if k in obj:
+                meta["paths"] = obj[k]
+                break
+        for k in ("ids", "image_ids", "img_ids"):
+            if k in obj:
+                meta["ids"] = obj[k]
+                break
+
     elif isinstance(obj, (tuple, list)) and len(obj) == 2:
         X, y = obj
+
     else:
-        raise ValueError("Formato do joblib não reconhecido. Esperado dict{'X','y'} ou tuple(X,y).")
-    return np.asarray(X), np.asarray(y)
+        raise ValueError("Formato do joblib do dataset não reconhecido. Esperado dict{'X','y'} ou tuple(X,y).")
+
+    X = np.asarray(X)
+    y = np.asarray(y)
+    return X, y, meta
 
 
-def selecionar_classes_elegiveis(y: np.ndarray, min_amostras: int):
+def selecionar_classes_elegiveis(y: np.ndarray, min_amostras: int) -> np.ndarray:
     classes, counts = np.unique(y, return_counts=True)
     return classes[counts >= int(min_amostras)].astype(np.int64, copy=False)
 
 
-def amostrar_classes(classes: np.ndarray, frac: float, seed: int):
+def amostrar_classes(classes: np.ndarray, frac: float, seed: int) -> np.ndarray:
     frac = float(frac)
     classes = np.asarray(classes, dtype=np.int64)
     if frac >= 0.999999:
@@ -136,116 +154,29 @@ def amostrar_classes(classes: np.ndarray, frac: float, seed: int):
     return np.sort(classes[idx]).astype(np.int64, copy=False)
 
 
-def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.ndarray):
+def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.ndarray,
+                        paths: Optional[np.ndarray] = None,
+                        ids: Optional[np.ndarray] = None,
+                        idx_global: Optional[np.ndarray] = None):
     mask = np.isin(y, classes_permitidas)
-    return X[mask], y[mask]
+    Xf = X[mask]
+    yf = y[mask]
+    pf = paths[mask] if paths is not None else None
+    idf = ids[mask] if ids is not None else None
+    igf = idx_global[mask] if idx_global is not None else None
+    return Xf, yf, pf, idf, igf
 
 
-# ============================================================
-# PADRONIZAÇÃO DA SAÍDA DO HOG (ESTABILIDADE)
-# ============================================================
-
-def fit_standardizer(X: np.ndarray, eps: float = 1e-6):
-    Xf = X.astype(np.float32, copy=False)
-    mean = Xf.mean(axis=0, dtype=np.float64).astype(np.float32)
-    var = ((Xf - mean).astype(np.float32, copy=False) ** 2).mean(axis=0, dtype=np.float64).astype(np.float32)
-    std = np.sqrt(var + np.float32(eps)).astype(np.float32)
-    return mean, std
-
-
-def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
+def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     Xf = X.astype(np.float32, copy=False)
     return ((Xf - mean) / std).astype(np.float32, copy=False)
 
 
 # ============================================================
-# Amostragem estratificada com mínimo por classe
+# Regressão logística: funções mínimas para inferência
 # ============================================================
 
-def amostrar_com_min_por_classe(y: np.ndarray, frac: float, seed: int, min_por_classe: int):
-    """
-    Retorna (idx_sample, classes_ok). Garante >= min_por_classe por classe (para classes que têm suporte).
-    Edge-cases corrigidos:
-      - Se frac>=1 -> retorna todos os índices (sem StratifiedShuffleSplit).
-      - Se add >= restantes.size -> pega todos os restantes (sem StratifiedShuffleSplit).
-    """
-    y = np.asarray(y)
-    n = int(y.shape[0])
-    frac = float(frac)
-
-    if n == 0:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-
-    classes, counts = np.unique(y, return_counts=True)
-    ok = counts >= int(min_por_classe)
-    classes_ok = classes[ok].astype(np.int64, copy=False)
-    if classes_ok.size == 0:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-
-    # se frac ~ 1, retorna tudo (mas ainda pode filtrar classes com suporte)
-    if frac >= 0.999999:
-        mask = np.isin(y, classes_ok)
-        idx = np.flatnonzero(mask).astype(np.int64, copy=False)
-        return idx, np.sort(classes_ok)
-
-    rng = np.random.default_rng(int(seed))
-
-    # pega min_por_classe de cada classe
-    idx_keep = []
-    for c in classes_ok:
-        idx_c = np.flatnonzero(y == c)
-        pick = rng.choice(idx_c, size=int(min_por_classe), replace=False)
-        idx_keep.append(pick)
-    idx_keep = np.concatenate(idx_keep).astype(np.int64, copy=False)
-
-    target = int(np.ceil(frac * n))
-    if target <= idx_keep.size:
-        return np.sort(idx_keep), np.sort(classes_ok)
-
-    restantes = np.setdiff1d(np.arange(n, dtype=np.int64), idx_keep, assume_unique=False)
-    if restantes.size == 0:
-        return np.sort(idx_keep), np.sort(classes_ok)
-
-    add = target - idx_keep.size
-    if add <= 0:
-        return np.sort(idx_keep), np.sort(classes_ok)
-
-    # se add cobre tudo, pega tudo sem StratifiedShuffleSplit (evita train_size==n_samples)
-    if add >= restantes.size:
-        idx_final = np.concatenate([idx_keep, restantes]).astype(np.int64, copy=False)
-        return np.sort(np.unique(idx_final)), np.sort(classes_ok)
-
-    y_rest = y[restantes]
-    sss = StratifiedShuffleSplit(n_splits=1, train_size=add, random_state=int(seed))
-    idx_add_rel, _ = next(sss.split(np.zeros(restantes.size), y_rest))
-    idx_add = restantes[idx_add_rel]
-
-    idx_final = np.concatenate([idx_keep, idx_add]).astype(np.int64, copy=False)
-    return np.sort(np.unique(idx_final)), np.sort(classes_ok)
-
-
-def limitar_classes_para_cv(X: np.ndarray, y: np.ndarray, max_classes: int | None, seed: int):
-    """
-    Esta é função que implementa o limite de classes para CV, que usamos para deixar o CV mais rápido
-    """
-    if max_classes is None:
-        return X, y
-    max_classes = int(max_classes)
-    if max_classes <= 0:
-        return X, y
-    classes = np.unique(y).astype(np.int64, copy=False)
-    if classes.size <= max_classes:
-        return X, y
-    rng = np.random.default_rng(int(seed))
-    chosen = rng.choice(classes, size=max_classes, replace=False)
-    return filtrar_por_classes(X, y, chosen.astype(np.int64, copy=False))
-
-
-# ============================================================
-# Utilitários: Softmax e encode de rótulos
-# ============================================================
-
-def stable_softmax(Z: np.ndarray):
+def stable_softmax(Z: np.ndarray) -> np.ndarray:
     Z = Z.astype(np.float32, copy=False)
     Zm = Z - Z.max(axis=1, keepdims=True)
     np.exp(Zm, out=Zm)
@@ -253,766 +184,1500 @@ def stable_softmax(Z: np.ndarray):
     return Zm
 
 
-def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
-    classes = np.asarray(classes, dtype=np.int64)
+def _row_norm_forward(A: np.ndarray, eps: float = 1e-8):
+    A = A.astype(np.float32, copy=False)
+    norms = np.sqrt(np.sum(A * A, axis=1, keepdims=True)) + float(eps)
+    inv = 1.0 / norms
+    return A * inv, inv.astype(np.float32, copy=False)
+
+
+def logreg_forward_proba(X: np.ndarray, modelo: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Retorna (P, logits) onde:
+      logits = X @ W + b
+      P = softmax(logits)
+    """
+    X = np.ascontiguousarray(X.astype(np.float32, copy=False))
+    W = np.asarray(modelo["W"], dtype=np.float32)
+    b = np.asarray(modelo["b"], dtype=np.float32)
+    logits = X @ W + b
+    P = stable_softmax(logits)
+    return P, logits.astype(np.float32, copy=False)
+
+
+def predict_labels_logreg(X: np.ndarray, modelo: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Retorna (y_pred, P, logits). y_pred no espaço das classes originais (IDs).
+    """
+    classes = np.asarray(modelo["classes"], dtype=np.int64)
+    P, logits = logreg_forward_proba(X, modelo)
+    idx = np.argmax(P, axis=1).astype(np.int64, copy=False)
+    y_pred = classes[idx]
+    return y_pred.astype(np.int64, copy=False), P, logits
+
+
+def extract_embeddings_logits(X: np.ndarray, modelo: Dict[str, Any]) -> np.ndarray:
+    """
+    Embedding = logits (X@W+b) L2-normalizado por linha (cosine-ready).
+    """
+    _P, logits = logreg_forward_proba(X, modelo)
+    emb, _ = _row_norm_forward(logits, eps=1e-8)
+    return emb.astype(np.float32, copy=False)
+
+
+# ============================================================
+# Métricas / Confusões
+# ============================================================
+
+def accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true, dtype=np.int64).ravel()
+    y_pred = np.asarray(y_pred, dtype=np.int64).ravel()
+    if y_true.size == 0:
+        return 0.0
+    return float(np.mean(y_true == y_pred))
+
+
+def confusion_one_vs_all(y_true: np.ndarray, y_pred: np.ndarray, pos_class: int) -> Dict[str, int]:
+    y_true = np.asarray(y_true, dtype=np.int64).ravel()
+    y_pred = np.asarray(y_pred, dtype=np.int64).ravel()
+
+    tpos = (y_true == int(pos_class))
+    ppos = (y_pred == int(pos_class))
+
+    TP = int(np.sum(tpos & ppos))
+    FP = int(np.sum((~tpos) & ppos))
+    FN = int(np.sum(tpos & (~ppos)))
+    TN = int(np.sum((~tpos) & (~ppos)))
+    return {"TP": TP, "FP": FP, "FN": FN, "TN": TN}
+
+
+def print_confusion_binary(title: str, cm: Dict[str, int]):
+    TP, FP, FN, TN = cm["TP"], cm["FP"], cm["FN"], cm["TN"]
+    print(f"\n{title}")
+    print("            Pred=0    Pred=1")
+    print(f"True=0      {TN:6d}    {FP:6d}")
+    print(f"True=1      {FN:6d}    {TP:6d}")
+    denom = TP + TN + FP + FN
+    acc = (TP + TN) / denom if denom > 0 else 0.0
+    print(f"acc={acc:.4f} | TP={TP} FP={FP} FN={FN} TN={TN}")
+
+
+# ============================================================
+# Autenticação: threshold tuning + avaliação de pares
+# ============================================================
+
+def _sample_positive_pairs_per_class(y: np.ndarray, rng: np.random.Generator, per_class: int):
     y = np.asarray(y, dtype=np.int64)
-    pos = np.searchsorted(classes, y)
-    if np.any(pos < 0) or np.any(pos >= classes.size) or np.any(classes[pos] != y):
-        raise ValueError("y contém rótulos fora de classes.")
-    return pos.astype(np.int64, copy=False)
+    pairs = []
+    classes = np.unique(y)
+    for c in classes:
+        idx = np.flatnonzero(y == c)
+        m = idx.size
+        if m < 2:
+            continue
+        max_pairs = m * (m - 1) // 2
+        k = int(min(per_class, max_pairs))
+        if k <= 0:
+            continue
+
+        got = 0
+        tries = 0
+        while got < k and tries < 10 * k:
+            i = int(rng.choice(idx))
+            j = int(rng.choice(idx))
+            if i == j:
+                tries += 1
+                continue
+            if i > j:
+                i, j = j, i
+            pairs.append((i, j, 1))
+            got += 1
+            tries += 1
+    return pairs
 
 
-# ============================================================
-# Definição da Perda: gradiente (Cross Entropy + L2 + L1)
-# ============================================================
+def _sample_negative_pairs(y: np.ndarray, rng: np.random.Generator, total: int):
+    y = np.asarray(y, dtype=np.int64)
+    n = int(y.size)
+    pairs = []
+    if n < 2 or total <= 0:
+        return pairs
 
-def data_loss_ce(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray):
-    Z = X @ W + b
-    P = stable_softmax(Z)
-    eps = np.float32(1e-12)
-    ll = -np.log(P[np.arange(P.shape[0]), y_idx] + eps)
-    return float(ll.mean())
-
-
-def reg_loss_elasticnet(W: np.ndarray, l1: float, l2: float, m_total: int):
-    m = float(max(int(m_total), 1))
-    reg = 0.0
-    if float(l2) != 0.0:
-        reg += (float(l2) / (2.0 * m)) * float(np.sum(W * W))
-    if float(l1) != 0.0:
-        reg += (float(l1) / m) * float(np.sum(np.abs(W)))
-    return float(reg)
-
-
-def objective_total(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray, l1: float, l2: float, m_total: int):
-    return data_loss_ce(W, b, X, y_idx) + reg_loss_elasticnet(W, l1, l2, m_total)
-
-
-def batch_grad_ce_l2(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray, l2: float, m_total: int):
-    """
-    gradiente:
-      Cross Entropy (média do batch) + (l2/(2*m_total))*||W||^2
-    """
-    B = int(X.shape[0])
-    Z = X @ W + b
-    P = stable_softmax(Z)
-    P[np.arange(B), y_idx] -= 1.0
-    P /= np.float32(max(B, 1))  # média do batch
-    dW = X.T @ P
-    if float(l2) != 0.0:
-        dW += (np.float32(l2) / np.float32(max(m_total, 1))) * W  # normaliza por m_total
-    db = P.sum(axis=0)
-    return dW.astype(np.float32, copy=False), db.astype(np.float32, copy=False)
+    tries = 0
+    got = 0
+    while got < total and tries < 20 * total:
+        i = int(rng.integers(0, n))
+        j = int(rng.integers(0, n))
+        if i == j:
+            tries += 1
+            continue
+        if y[i] == y[j]:
+            tries += 1
+            continue
+        if i > j:
+            i, j = j, i
+        pairs.append((i, j, 0))
+        got += 1
+        tries += 1
+    return pairs
 
 
-def proximal_l1(W: np.ndarray, thresh: float):
-    thresh = np.float32(thresh)
-    return np.sign(W) * np.maximum(np.float32(0.0), np.abs(W) - thresh)
-
-
-# ============================================================
-# Armijo (por época) em probe batch
-# ============================================================
-
-def armijo_alpha_epoch(
-    W: np.ndarray, b: np.ndarray,
-    Xp: np.ndarray, yp_idx: np.ndarray,
-    dW_p: np.ndarray, db_p: np.ndarray,
-    l1: float, l2: float,
-    m_total: int,
-    alpha_start: float,
-    alpha0: float,
-    beta: float,
-    c1: float,
-    max_backtracks: int,
-    alpha_min: float,
+def _binary_counts_from_pred_truth(
+    pred=None,
+    truth=None,
+    y_pred=None,
+    y_true=None,
+    **kwargs
 ):
-    alpha = float(min(alpha_start, alpha0))
-    F_old = objective_total(W, b, Xp, yp_idx, l1=l1, l2=l2, m_total=m_total)
-    g2 = float(np.sum(dW_p * dW_p) + np.sum(db_p * db_p))
-    if g2 <= 0.0:
-        return max(alpha, alpha_min), 0, F_old, F_old
+    """
+    Compatível com chamadas:
+      - _binary_counts_from_pred_truth(pred, truth)
+      - _binary_counts_from_pred_truth(pred=..., truth=...)
+      - _binary_counts_from_pred_truth(y_pred=..., y_true=...)  (como no seu main)
+    """
+    if pred is None:
+        pred = y_pred
+    if truth is None:
+        truth = y_true
+    if pred is None or truth is None:
+        raise ValueError("Você precisa fornecer (pred, truth) ou (y_pred, y_true).")
 
-    bt = 0
-    while True:
-        W_try = proximal_l1(W - np.float32(alpha) * dW_p, thresh=(alpha * float(l1)) / float(max(m_total, 1)))
-        b_try = b - np.float32(alpha) * db_p
-        F_new = objective_total(W_try, b_try, Xp, yp_idx, l1=l1, l2=l2, m_total=m_total)
+    pred = np.asarray(pred).astype(bool)
+    truth = np.asarray(truth).astype(bool)
 
-        if (F_new <= F_old - float(c1) * alpha * g2) or (alpha <= float(alpha_min)) or (bt >= int(max_backtracks)):
-            return max(alpha, alpha_min), bt, F_old, F_new
+    TP = int(np.sum(pred & truth))
+    TN = int(np.sum((~pred) & (~truth)))
+    FP = int(np.sum(pred & (~truth)))
+    FN = int(np.sum((~pred) & truth))
+    return {"TP": TP, "TN": TN, "FP": FP, "FN": FN}
 
-        alpha *= float(beta)
-        bt += 1
+def _binary_metrics_from_counts(cm: Dict[str, int]) -> Dict[str, float]:
+    TP = float(cm["TP"]); TN = float(cm["TN"]); FP = float(cm["FP"]); FN = float(cm["FN"])
+    denom = TP + TN + FP + FN
+    acc = (TP + TN) / denom if denom > 0 else 0.0
+    prec = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+    rec = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    tpr = rec
+    tnr = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    bal_acc = 0.5 * (tpr + tnr)
+    return {"acc": float(acc), "precision": float(prec), "recall": float(rec), "f1": float(f1), "balanced_acc": float(bal_acc)}
 
 
-# ============================================================
-# Treino SGD + proximal L1 (elastic net) + EARLY STOPPING
-# ============================================================
+def _score_summary(scores: np.ndarray) -> Dict[str, float]:
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    if scores.size == 0:
+        return {"n": 0}
+    qs = np.quantile(scores, [0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]).astype(np.float32)
+    return {
+        "n": int(scores.size),
+        "min": float(qs[0]),
+        "q05": float(qs[1]),
+        "q25": float(qs[2]),
+        "median": float(qs[3]),
+        "q75": float(qs[4]),
+        "q95": float(qs[5]),
+        "max": float(qs[6]),
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+    }
 
-def treinar_softmax_elasticnet_sgd(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    classes_modelo: np.ndarray,
-    l1: float,
-    l2: float,
-    epochs: int,
-    batch_size: int,
-    seed: int,
-    use_armijo: bool = True,
 
-    # --- validação/monitor + early stopping ---
-    X_val: np.ndarray | None = None,
-    y_val: np.ndarray | None = None,
-    earlystop_enable: bool = False,
-    earlystop_metric: str = "val_acc",     # "val_acc" ou "val_loss"
-    earlystop_warmup: int = 0,
-    earlystop_patience: int = 10,
-    earlystop_min_delta: float = 0.0,
-    earlystop_restore_best: bool = True,
-    earlystop_val_max: int | None = None,  # subsample fixo do val para monitoramento (int ou None)
-):
-    rng = np.random.default_rng(int(seed))
-    X_train = np.ascontiguousarray(X_train.astype(np.float32, copy=False))
-    y_train = y_train.astype(np.int64, copy=False)
-    classes_modelo = np.sort(np.unique(classes_modelo)).astype(np.int64, copy=False)
+def build_tuning_pairs(y: np.ndarray, rng: np.random.Generator,
+                       pos_pairs_per_class: int, neg_pairs_total: int,
+                       balanced: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Gera pares (i,j) com rótulo binário de "mesma classe?" (tt=1) ou "classes diferentes?" (tt=0).
+    Tuning balanceado: limita #negativos ~ #positivos para evitar "acurácia alta só chutando negativo".
+    """
+    y = np.asarray(y, dtype=np.int64)
+    pos_pairs = _sample_positive_pairs_per_class(y, rng, per_class=int(pos_pairs_per_class))
+    n_pos = int(len(pos_pairs))
+    n_neg_target = int(neg_pairs_total)
+    if balanced and n_pos > 0:
+        n_neg_target = min(int(neg_pairs_total), n_pos)
+    neg_pairs = _sample_negative_pairs(y, rng, total=int(n_neg_target))
+    pairs = pos_pairs + neg_pairs
+    if len(pairs) == 0:
+        ii = np.zeros((0,), dtype=np.int64)
+        jj = np.zeros((0,), dtype=np.int64)
+        tt = np.zeros((0,), dtype=np.int8)
+        info = {"pairs_used": 0, "pos_pairs": 0, "neg_pairs": 0}
+        return ii, jj, tt, info
 
-    y_idx = codificar_rotulos(y_train, classes_modelo)
+    ii = np.array([p[0] for p in pairs], dtype=np.int64)
+    jj = np.array([p[1] for p in pairs], dtype=np.int64)
+    tt = np.array([p[2] for p in pairs], dtype=np.int8)
+    info = {"pairs_used": int(len(pairs)), "pos_pairs": int(len(pos_pairs)), "neg_pairs": int(len(neg_pairs))}
+    return ii, jj, tt, info
 
-    m_total = int(X_train.shape[0])
-    d = int(X_train.shape[1])
-    K = int(classes_modelo.shape[0])
 
-    W = (0.01 * rng.standard_normal((d, K))).astype(np.float32)
-    b = np.zeros((K,), dtype=np.float32)
+def tune_threshold_scores(scores: np.ndarray, truth: np.ndarray, q_grid: int,
+                          metric: str = "f1") -> Tuple[float, Dict[str, Any]]:
+    """
+    Escolhe threshold maximizando F1 ou balanced-acc (ou acc).
+    - scores: valores contínuos (maior = mais provável ser a mesma classe)
+    - truth: 1 (mesma classe) / 0 (diferente)
+    """
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    truth = np.asarray(truth, dtype=np.int8).ravel()
+    if scores.size == 0:
+        return 0.5, {"note": "sem scores para tuning; usando thr=0.5"}
 
-    # warm-start alpha por época
-    alpha_prev = float(CONFIG["armijo_alpha0"])
-    alphas = []
-    backtracks = []
-    loss_hist = []
+    q_grid = int(max(21, q_grid))
+    qs = np.linspace(0.0, 1.0, q_grid, dtype=np.float32)
+    thrs = np.unique(np.quantile(scores, qs))
+    best_thr = float(thrs[0])
+    best_val = -1.0
+    best_cm = None
+    best_metrics = None
 
-    batch_size = int(batch_size)
-    if batch_size <= 0 or batch_size > m_total:
-        batch_size = m_total
+    metric = (metric or "f1").strip().lower()
+    if metric not in ("f1", "balanced_acc", "acc"):
+        metric = "f1"
 
-    probe = int(CONFIG["armijo_probe_batch"])
-    if probe <= 0:
-        probe = min(2048, m_total)
-
-    # --- prepara val/monitor  ---
-    use_val = (X_val is not None) and (y_val is not None)
-    if use_val:
-        X_val = np.ascontiguousarray(np.asarray(X_val).astype(np.float32, copy=False))
-        y_val = np.asarray(y_val).astype(np.int64, copy=False)
-        y_val_idx = codificar_rotulos(y_val, classes_modelo)
-
-        # subsample fixo opcional para monitoramento
-        if earlystop_val_max is not None:
-            vmax = int(earlystop_val_max)
-            if vmax > 0 and X_val.shape[0] > vmax:
-                rng_val = np.random.default_rng(int(seed) + 7777)
-                sel = rng_val.choice(X_val.shape[0], size=vmax, replace=False)
-                X_val = X_val[sel]
-                y_val = y_val[sel]
-                y_val_idx = y_val_idx[sel]
-
-    # --- estado do early stop ---
-    earlystop_enable = bool(earlystop_enable) and use_val
-    earlystop_metric = str(earlystop_metric).strip().lower()
-    earlystop_warmup = int(max(0, earlystop_warmup))
-    earlystop_patience = int(max(1, earlystop_patience))
-    earlystop_min_delta = float(earlystop_min_delta)
-    earlystop_restore_best = bool(earlystop_restore_best)
-
-    best_metric = None
-    best_epoch = None
-    best_W = None
-    best_b = None
-    wait = 0
-    stopped_early = False
-
-    def _compute_val_metric():
-        # retorna (metric_name, metric_value)
-        if not use_val:
-            return None, None
-
-        if earlystop_metric == "val_loss":
-            # loss de dados (CE) no val/monitor (sem regularização)
-            v = data_loss_ce(W, b, X_val, y_val_idx)
-            return "val_loss", float(v)
-
-        # default: val_acc
-        yhat_val, _ = predict_labels(X_val, W, b, classes_modelo)
-        v = float(np.mean(yhat_val == y_val))
-        return "val_acc", float(v)
-
-    def _is_improvement(curr, best):
-        if best is None:
-            return True
-        if earlystop_metric == "val_loss":
-            return (best - curr) > earlystop_min_delta
-        return (curr - best) > earlystop_min_delta
-
-    for ep in range(int(epochs)):
-        # decide alpha da época via Armijo em probe batch
-        if use_armijo:
-            pb = min(probe, m_total)
-            probe_idx = rng.choice(m_total, size=pb, replace=False)
-            Xp = X_train[probe_idx]
-            yp = y_idx[probe_idx]
-
-            dW_p, db_p = batch_grad_ce_l2(W, b, Xp, yp, l2=float(l2), m_total=m_total)
-            alpha_start = min(float(CONFIG["armijo_alpha0"]), alpha_prev * float(CONFIG["armijo_growth"]))
-
-            alpha_ep, bt, F_old, F_new = armijo_alpha_epoch(
-                W=W, b=b,
-                Xp=Xp, yp_idx=yp,
-                dW_p=dW_p, db_p=db_p,
-                l1=float(l1), l2=float(l2),
-                m_total=m_total,
-                alpha_start=alpha_start,
-                alpha0=float(CONFIG["armijo_alpha0"]),
-                beta=float(CONFIG["armijo_beta"]),
-                c1=float(CONFIG["armijo_c1"]),
-                max_backtracks=int(CONFIG["armijo_max_backtracks"]),
-                alpha_min=float(CONFIG["armijo_alpha_min"]),
-            )
-            alpha_prev = float(alpha_ep)
-            alphas.append(float(alpha_ep))
-            backtracks.append(int(bt))
-            print(f"[Armijo] ep={ep+1:03d}/{epochs} alpha={alpha_ep:.3e} bt={bt} F {F_old:.4f}->{F_new:.4f}")
-        else:
-            alpha_ep = float(CONFIG["armijo_alpha0"])
-            alphas.append(float(alpha_ep))
-            backtracks.append(0)
-
-        a32 = np.float32(alpha_ep)
-        shrink = a32 * (np.float32(l1) / np.float32(max(m_total, 1)))
-
-        perm = rng.permutation(m_total)
-        n_batches = int(np.ceil(m_total / batch_size))
-
-        for bi, start in enumerate(range(0, m_total, batch_size), start=1):
-            idx = perm[start:start + batch_size]
-            Xb = X_train[idx]
-            yb = y_idx[idx]
-
-            dW, db = batch_grad_ce_l2(W, b, Xb, yb, l2=float(l2), m_total=m_total)
-            W -= a32 * dW
-            b -= a32 * db
-            if float(l1) != 0.0:
-                W = proximal_l1(W, thresh=float(shrink))
-
-            if bi % int(CONFIG["print_every_batches"]) == 0 or bi == n_batches:
-                loss_est = objective_total(W, b, Xb, yb, l1=float(l1), l2=float(l2), m_total=m_total)
-                print(f"[Treino] ep={ep+1:03d}/{epochs} batch={bi:04d}/{n_batches} loss~={loss_est:.4f}", end="\r")
-
-        print(" " * 120, end="\r")
-
-        sub_n = min(int(CONFIG["loss_subsample_max"]), m_total)
-        sub = rng.choice(m_total, size=sub_n, replace=False)
-        loss_ep = objective_total(W, b, X_train[sub], y_idx[sub], l1=float(l1), l2=float(l2), m_total=m_total)
-        loss_hist.append(float(loss_ep))
-
-        # --- early stopping: avalia val/monitor ao fim da época ---
-        if earlystop_enable:
-            mname, mval = _compute_val_metric()
-            print(f"[SGD] ep={ep+1:03d}/{epochs} alpha={alpha_ep:.3e} loss_sub~={loss_ep:.6f} | {mname}={mval:.6f}")
-            if _is_improvement(mval, best_metric):
-                best_metric = float(mval)
-                best_epoch = int(ep + 1)
-                wait = 0
-                if earlystop_restore_best:
-                    best_W = W.copy()
-                    best_b = b.copy()
-            else:
-                # só conta paciência após warmup
-                if (ep + 1) >= earlystop_warmup:
-                    wait += 1
-                    if wait >= earlystop_patience:
-                        stopped_early = True
-                        print(f"[EARLY STOP] stop em ep={ep+1} (best_ep={best_epoch}, best_{mname}={best_metric:.6f})")
-                        break
-        else:
-            print(f"[SGD] ep={ep+1:03d}/{epochs} alpha={alpha_ep:.3e} loss_sub~={loss_ep:.6f}")
-
-    # restaura melhor estado (se habilitado e coletado)
-    if earlystop_enable and earlystop_restore_best and best_W is not None and best_b is not None:
-        W = best_W
-        b = best_b
+    for thr in thrs:
+        pred = scores >= float(thr)
+        cm = _binary_counts_from_pred_truth(pred, truth == 1)
+        mets = _binary_metrics_from_counts(cm)
+        val = mets["f1"] if metric == "f1" else (mets["balanced_acc"] if metric == "balanced_acc" else mets["acc"])
+        if val > best_val:
+            best_val = float(val)
+            best_thr = float(thr)
+            best_cm = cm
+            best_metrics = mets
 
     stats = {
-        "alpha_epoch": alphas,
-        "alpha_mean": float(np.mean(alphas)) if alphas else None,
-        "alpha_median": float(np.median(alphas)) if alphas else None,
-        "alpha_min": float(np.min(alphas)) if alphas else None,
-        "alpha_max": float(np.max(alphas)) if alphas else None,
-        "armijo_bt_mean": float(np.mean(backtracks)) if backtracks else None,
-        "armijo_bt_max": int(np.max(backtracks)) if backtracks else None,
-        "loss_hist_sub": loss_hist,
-
-        # --- early stop stats ---
-        "early_stop_enabled": bool(earlystop_enable),
-        "early_stop_metric": earlystop_metric if earlystop_enable else None,
-        "early_stop_best_metric": best_metric if earlystop_enable else None,
-        "early_stop_best_epoch": best_epoch if earlystop_enable else None,
-        "early_stop_wait": int(wait) if earlystop_enable else None,
-        "early_stop_stopped": bool(stopped_early) if earlystop_enable else False,
-        "early_stop_epochs_ran": int(min(len(loss_hist), int(epochs))),
+        "metric_optimized": metric,
+        "best_metric_value": float(best_val),
+        "best_thr": float(best_thr),
+        "best_cm": best_cm,
+        "best_metrics": best_metrics,
+        "thr_candidates": int(thrs.size),
+        "scores_summary": _score_summary(scores),
+        "pos_scores_summary": _score_summary(scores[truth == 1]),
+        "neg_scores_summary": _score_summary(scores[truth == 0]),
     }
-    return {"W": W, "b": b, "classes": classes_modelo, "stats": stats}
+    return best_thr, stats
 
 
-# ============================================================
-# Predição / métricas
-# ============================================================
+def tune_threshold_identity_confidence(y_pred: np.ndarray, pmax: np.ndarray,
+                                       ii: np.ndarray, jj: np.ndarray, truth: np.ndarray,
+                                       q_grid: int, metric: str = "f1") -> Tuple[float, Dict[str, Any]]:
+    """
+    Regra de verificação baseada em identidade prevista e confiança:
+      same = (y_pred[i] == y_pred[j]) AND (min(pmax_i, pmax_j) >= thr_conf)
 
-def predict_labels(X: np.ndarray, W: np.ndarray, b: np.ndarray, classes: np.ndarray):
-    X = np.ascontiguousarray(X.astype(np.float32, copy=False))
-    P = stable_softmax(X @ W + b)
-    idx = np.argmax(P, axis=1).astype(np.int64, copy=False)
-    return classes[idx], P
+    Faz tuning do thr_conf (balanceado via truth fornecido).
+    """
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    pmax = np.asarray(pmax, dtype=np.float32)
+    ii = np.asarray(ii, dtype=np.int64)
+    jj = np.asarray(jj, dtype=np.int64)
+    truth = np.asarray(truth, dtype=np.int8).ravel()
+    if ii.size == 0:
+        return 0.5, {"note": "sem pares para tuning; usando thr=0.5"}
+
+    same_id = (y_pred[ii] == y_pred[jj])
+    conf = np.minimum(pmax[ii], pmax[jj]).astype(np.float32, copy=False)
+
+    q_grid = int(max(21, q_grid))
+    qs = np.linspace(0.0, 1.0, q_grid, dtype=np.float32)
+    thrs = np.unique(np.quantile(conf, qs))
+    best_thr = float(thrs[0])
+    best_val = -1.0
+    best_cm = None
+    best_metrics = None
+
+    metric = (metric or "f1").strip().lower()
+    if metric not in ("f1", "balanced_acc", "acc"):
+        metric = "f1"
+
+    for thr in thrs:
+        pred = same_id & (conf >= float(thr))
+        cm = _binary_counts_from_pred_truth(pred, truth == 1)
+        mets = _binary_metrics_from_counts(cm)
+        val = mets["f1"] if metric == "f1" else (mets["balanced_acc"] if metric == "balanced_acc" else mets["acc"])
+        if val > best_val:
+            best_val = float(val)
+            best_thr = float(thr)
+            best_cm = cm
+            best_metrics = mets
+
+    stats = {
+        "metric_optimized": metric,
+        "best_metric_value": float(best_val),
+        "best_thr": float(best_thr),
+        "best_cm": best_cm,
+        "best_metrics": best_metrics,
+        "thr_candidates": int(thrs.size),
+        "conf_summary_all": _score_summary(conf),
+        "conf_summary_sameid": _score_summary(conf[same_id]),
+        "conf_summary_diffid": _score_summary(conf[~same_id]),
+    }
+    return best_thr, stats
 
 
-def report_accuracy(nome: str, y_true: np.ndarray, y_pred: np.ndarray):
-    y_true = y_true.astype(np.int64, copy=False)
-    y_pred = y_pred.astype(np.int64, copy=False)
-    acc = float(np.mean(y_true == y_pred)) if y_true.size else 0.0
-    print(f"[ACC] {nome}: {acc:.4f} ({int(np.sum(y_true==y_pred))}/{y_true.size})")
-    return acc
+def eval_auth_pairs_full(emb: np.ndarray, y: np.ndarray, thr: float) -> Dict[str, Any]:
+    """
+    Avalia todas as combinações (i<j) sem armazenar índices enormes.
+    Retorna contagens TP/TN/FP/FN e métricas.
+    """
+    emb = np.asarray(emb, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+    n = int(y.size)
+    if n < 2:
+        return {"note": "N<2", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+
+    TP = TN = FP = FN = 0
+    for i in range(n - 1):
+        sims = emb[i+1:] @ emb[i]  # (n-i-1,)
+        pred = sims >= float(thr)
+        truth = (y[i+1:] == y[i])
+        TP += int(np.sum(pred & truth))
+        TN += int(np.sum((~pred) & (~truth)))
+        FP += int(np.sum(pred & (~truth)))
+        FN += int(np.sum((~pred) & truth))
+
+    pairs = n * (n - 1) // 2
+    mets = _binary_metrics_from_counts({"TP": TP, "TN": TN, "FP": FP, "FN": FN})
+    return {"mode": "full", "pairs": int(pairs), "TP": TP, "TN": TN, "FP": FP, "FN": FN, **{f"m_{k}": v for k, v in mets.items()}}
 
 
-def mostrar_exemplos_previsao(y_true: np.ndarray, y_pred: np.ndarray, P: np.ndarray, n: int, seed: int):
-    rng = np.random.default_rng(int(seed))
+def eval_auth_pairs_full_prob(P: np.ndarray, y: np.ndarray, thr: float) -> Dict[str, Any]:
+    """Avalia todas as combinações com score = dot(P_i, P_j)."""
+    P = np.asarray(P, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+    n = int(y.size)
+    if n < 2:
+        return {"note": "N<2", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+
+    TP = TN = FP = FN = 0
+    for i in range(n - 1):
+        sims = P[i+1:] @ P[i]
+        pred = sims >= float(thr)
+        truth = (y[i+1:] == y[i])
+        TP += int(np.sum(pred & truth))
+        TN += int(np.sum((~pred) & (~truth)))
+        FP += int(np.sum(pred & (~truth)))
+        FN += int(np.sum((~pred) & truth))
+
+    pairs = n * (n - 1) // 2
+    mets = _binary_metrics_from_counts({"TP": TP, "TN": TN, "FP": FP, "FN": FN})
+    return {"mode": "full", "pairs": int(pairs), "TP": TP, "TN": TN, "FP": FP, "FN": FN, **{f"m_{k}": v for k, v in mets.items()}}
+
+
+def eval_auth_pairs_full_identity_confidence(y_pred: np.ndarray, pmax: np.ndarray, y_true: np.ndarray,
+                                             thr_conf: float) -> Dict[str, Any]:
+    """Avalia todas as combinações com regra: same_id_pred & min_conf >= thr_conf."""
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    pmax = np.asarray(pmax, dtype=np.float32)
+    y_true = np.asarray(y_true, dtype=np.int64)
+    n = int(y_true.size)
+    if n < 2:
+        return {"note": "N<2", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+
+    TP = TN = FP = FN = 0
+    for i in range(n - 1):
+        same_id = (y_pred[i+1:] == y_pred[i])
+        conf = np.minimum(pmax[i+1:], pmax[i])
+        pred = same_id & (conf >= float(thr_conf))
+        truth = (y_true[i+1:] == y_true[i])
+        TP += int(np.sum(pred & truth))
+        TN += int(np.sum((~pred) & (~truth)))
+        FP += int(np.sum(pred & (~truth)))
+        FN += int(np.sum((~pred) & truth))
+
+    pairs = n * (n - 1) // 2
+    mets = _binary_metrics_from_counts({"TP": TP, "TN": TN, "FP": FP, "FN": FN})
+    return {"mode": "full", "pairs": int(pairs), "TP": TP, "TN": TN, "FP": FP, "FN": FN, **{f"m_{k}": v for k, v in mets.items()}}
+
+
+def _sample_pairs_uniform(n: int, rng: np.random.Generator, n_pairs: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Amostra n_pairs pares (i<j) aproximadamente uniformes (com reposição).
+
+    Observações:
+      - Para n grande, amostragem SEM reposição/sem duplicatas é cara e desnecessária aqui.
+      - Duplicatas têm efeito desprezível nas métricas/ROC quando n_pairs é grande.
+
+    Retorna:
+      ii, jj: arrays int64 com shape (n_pairs,), com ii[k] < jj[k] e ii[k] != jj[k].
+    """
     n = int(n)
-    if n <= 0 or y_true.size == 0:
-        return
-    idx = rng.choice(y_true.size, size=min(n, y_true.size), replace=False)
-    print("\n[Exemplos] (y_true -> y_pred | p_max)")
-    for i in idx:
-        print(f"  {int(y_true[i])} -> {int(y_pred[i])} | p={float(P[i].max()):.3f}")
+    n_pairs = int(n_pairs)
+    if n < 2 or n_pairs <= 0:
+        return (np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64))
+
+    ii = rng.integers(0, n, size=n_pairs, dtype=np.int64)
+    jj = rng.integers(0, n, size=n_pairs, dtype=np.int64)
+
+    # garante i != j (re-amostra apenas onde necessário)
+    mask = (ii == jj)
+    while np.any(mask):
+        jj[mask] = rng.integers(0, n, size=int(np.sum(mask)), dtype=np.int64)
+        mask = (ii == jj)
+
+    # normaliza para i < j
+    swap = ii > jj
+    if np.any(swap):
+        tmp = ii[swap].copy()
+        ii[swap] = jj[swap]
+        jj[swap] = tmp
+
+    return ii, jj
 
 
-def matriz_confusao_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
-    top_k = int(top_k)
-    if top_k <= 0 or y_true.size == 0:
-        return
-    classes, counts = np.unique(y_true, return_counts=True)
-    order = np.argsort(-counts)
-    top = classes[order[:top_k]]
-    mask = np.isin(y_true, top)
-    cm = confusion_matrix(y_true[mask], y_pred[mask], labels=top)
-    print(f"\n[Matriz de Confusão] Top-{top_k} classes (TESTE filtrado):")
-    print("labels:", top.tolist())
-    print(cm)
+def eval_auth_pairs_sample(emb: np.ndarray, y: np.ndarray, thr: float, rng: np.random.Generator, n_pairs: int):
+    emb = np.asarray(emb, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int64)
+    n = int(y.size)
+    if n < 2:
+        return {"note": "N<2", "pairs": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0}
+
+    ii, jj = _sample_pairs_uniform(n=n, rng=rng, n_pairs=int(n_pairs))
+    truth = (y[ii] == y[jj])
+    sims = np.sum(emb[ii] * emb[jj], axis=1).astype(np.float32, copy=False)
+    pred = sims >= float(thr)
+
+    cm = _binary_counts_from_pred_truth(pred, truth)
+    mets = _binary_metrics_from_counts(cm)
+    return {"mode": "sample", "pairs": int(ii.size), "TP": cm["TP"], "TN": cm["TN"], "FP": cm["FP"], "FN": cm["FN"], **{f"m_{k}": v for k, v in mets.items()}}
 
 
 # ============================================================
-# CV: combos L1/L2
+# ROC + AUC (sem sklearn)
 # ============================================================
 
-def montar_combos_l1_l2(grid_l1, grid_l2, max_combos: int, strategy: str, seed: int):
-    grid_l1 = [float(x) for x in grid_l1]
-    grid_l2 = [float(x) for x in grid_l2]
-    full = [(a, b) for a in grid_l1 for b in grid_l2]
+def roc_auc_fast(scores, y_true=None, truth=None, y=None, **kwargs):
+    """
+    ROC-AUC em O(n log n) com tratamento de empates (ties).
 
-    if max_combos is None or int(max_combos) <= 0 or len(full) <= int(max_combos):
-        return full
+    Compatível com chamadas:
+      - roc_auc_fast(scores, truth)
+      - roc_auc_fast(scores=s, y_true=...)
+      - roc_auc_fast(scores=s, truth=...)
+      - roc_auc_fast(scores=s, y=...)
 
-    max_combos = int(max_combos)
-    rng = np.random.default_rng(int(seed))
-    strategy = str(strategy).lower().strip()
+    Referência: estatística U de Mann–Whitney / soma de ranks (AUC = P(score_pos > score_neg) + 0.5*P(tie)).
+    """
+    if y_true is None:
+        y_true = truth if truth is not None else y
 
-    if strategy == "random":
-        idx = rng.choice(len(full), size=max_combos, replace=False)
-        return [full[i] for i in idx]
+    if y_true is None:
+        raise TypeError("roc_auc_fast: forneça y_true (ou truth/y).")
 
-    # cover
-    combos = []
-    def add(p):
-        if p in full and p not in combos:
-            combos.append(p)
+    scores = np.asarray(scores, dtype=np.float64).ravel()
+    y_true = np.asarray(y_true).ravel()
 
-    g1 = sorted(set(grid_l1))
-    g2 = sorted(set(grid_l2))
-    i0, im, i1 = 0, len(g1)//2, len(g1)-1
-    j0, jm, j1 = 0, len(g2)//2, len(g2)-1
+    if y_true.dtype != np.bool_:
+        y_true = (y_true.astype(np.int64) == 1)
 
-    base = [
-        (g1[i0], g2[j0]), (g1[i0], g2[jm]), (g1[i0], g2[j1]),
-        (g1[im], g2[j0]), (g1[im], g2[jm]), (g1[im], g2[j1]),
-        (g1[i1], g2[j0]), (g1[i1], g2[j1]),
-    ]
-    for p in base:
-        add(p)
+    if scores.size != y_true.size:
+        raise ValueError(f"roc_auc_fast: tamanhos diferentes: scores={scores.size}, y_true={y_true.size}")
 
-    if len(combos) >= max_combos:
-        return combos[:max_combos]
+    n = int(scores.size)
+    n_pos = int(np.sum(y_true))
+    n_neg = n - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return 0.0  # AUC indefinido; aqui devolvemos 0.0 para não quebrar pipeline
 
-    rest = [p for p in full if p not in combos]
-    rng.shuffle(rest)
-    combos.extend(rest[:max_combos - len(combos)])
-    return combos[:max_combos]
+    order = np.argsort(scores, kind="mergesort")  # mergesort é estável (bom para ties)
+    s_sorted = scores[order]
+    y_sorted = y_true[order]
+
+    # Soma de ranks dos positivos com empates: atribui rank médio ao grupo empatado
+    rank_sum_pos = 0.0
+    rank = 1  # ranks 1..n
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and s_sorted[j] == s_sorted[i]:
+            j += 1
+
+        group_size = j - i
+        avg_rank = (rank + (rank + group_size - 1)) / 2.0
+        pos_in_group = float(np.sum(y_sorted[i:j]))
+        rank_sum_pos += pos_in_group * avg_rank
+
+        rank += group_size
+        i = j
+
+    auc = (rank_sum_pos - (n_pos * (n_pos + 1) / 2.0)) / (n_pos * n_neg)
+    return float(auc)
 
 
-def escolher_melhores_lambdas_por_cv(
-    X_cv: np.ndarray,
-    y_cv: np.ndarray,
-    k_folds: int,
-    grid_l1,
-    grid_l2,
-    epochs_cv: int,
-    batch_size_cv: int,
-    seed: int,
-):
-    skf = StratifiedKFold(n_splits=int(k_folds), shuffle=True, random_state=int(seed))
-    classes_cv = np.unique(y_cv).astype(np.int64, copy=False)
 
-    combos = montar_combos_l1_l2(
-        grid_l1=grid_l1,
-        grid_l2=grid_l2,
-        max_combos=int(CONFIG["max_combos_cv"]),
-        strategy=str(CONFIG["combo_strategy_cv"]),
-        seed=int(CONFIG["seed_combos_cv"]),
-    )
-    print(f"[CV] combos testados ({len(combos)}): {combos}")
 
-    best = None  # ((l1,l2), acc, alpha_med)
 
-    for (l1, l2) in combos:
-        accs = []
-        alpha_meds = []
-        for fold, (tr, va) in enumerate(skf.split(X_cv, y_cv), start=1):
-            Xtr, ytr = X_cv[tr], y_cv[tr]
-            Xva, yva = X_cv[va], y_cv[va]
+def auth_macro_auc_per_identity(
+    y=None,
+    y_true=None,
+    truth=None,
+    y_pred=None,
+    pred=None,
+    pmax=None,
+    conf=None,
+    emb=None,
+    E=None,
+    P=None,
+    probs=None,
+    rng=None,
+    random_state=None,
+    cfg=None,
+    macro_cfg=None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Macro ROC-AUC de AUTENTICAÇÃO por identidade (one-vs-all, em pares).
 
-            modelo = treinar_softmax_elasticnet_sgd(
-                X_train=Xtr,
-                y_train=ytr,
-                classes_modelo=classes_cv,
-                l1=float(l1), l2=float(l2),
-                epochs=int(epochs_cv),
-                batch_size=int(batch_size_cv),
-                seed=int(seed) + 1000*fold + 7,
-                use_armijo=True,
+    Para cada identidade/classe c:
+      - Positivos: pares (i,j) com y_true[i]==c e y_true[j]==c
+      - Negativos: pares (i,j) com y_true[i]==c e y_true[j]!=c
+      - Calcula AUC(c) para 3 scores de verificação:
+          1) cosine  : dot de embeddings L2-normalizados (cosine similarity)
+          2) prob_dot: dot entre vetores de probabilidades por classe
+          3) id+conf : (mesmo ID predito) * min(pmax_i, pmax_j)
 
-                # --- early stopping no CV (por fold) ---
-                X_val=Xva,
-                y_val=yva,
-                earlystop_enable=bool(CONFIG["earlystop_cv_enable"]),
-                earlystop_metric=str(CONFIG["earlystop_cv_metric"]),
-                earlystop_warmup=int(CONFIG["earlystop_cv_warmup"]),
-                earlystop_patience=int(CONFIG["earlystop_cv_patience"]),
-                earlystop_min_delta=float(CONFIG["earlystop_cv_min_delta"]),
-                earlystop_restore_best=bool(CONFIG["earlystop_cv_restore_best"]),
-                earlystop_val_max=CONFIG["earlystop_cv_val_max"],
+    Retorna a MÉDIA (macro) e MEDIANA dos AUCs por identidade para cada score.
+
+    Observação:
+      - Isto NÃO é o AUC global (micro-AUC) em pares do dataset inteiro.
+      - Macro-AUC dá peso igual para cada identidade, mesmo que algumas tenham mais imagens.
+    """
+    # ----------------------------
+    # Resolver cfg + enable
+    # ----------------------------
+    if cfg is None:
+        cfg = macro_cfg or {}
+    cfg = dict(cfg) if isinstance(cfg, dict) else {}
+
+    enable = bool(cfg.get("enable", True))
+    if not enable:
+        return {"enabled": False}
+
+    # ----------------------------
+    # Compatibilidade de nomes (MLP vs LogReg / chamadas antigas)
+    # ----------------------------
+    if y_true is None:
+        y_true = y if y is not None else truth
+    if y_pred is None:
+        y_pred = pred
+    if pmax is None:
+        pmax = conf
+    if emb is None:
+        emb = E
+    if P is None:
+        P = probs
+
+    if y_true is None or y_pred is None or pmax is None or emb is None or P is None:
+        raise ValueError(
+            "auth_macro_auc_per_identity: forneça y_true/y, y_pred, pmax (conf), emb (E) e P (probs)."
+        )
+
+    # ----------------------------
+    # RNG
+    # ----------------------------
+    if rng is None:
+        rng = random_state
+    if isinstance(rng, np.random.Generator):
+        rg = rng
+    elif rng is None:
+        rg = np.random.default_rng(123)
+    else:
+        rg = np.random.default_rng(int(rng))
+
+    # ----------------------------
+    # Normalização de entradas
+    # ----------------------------
+    y_true = np.asarray(y_true, dtype=np.int64).ravel()
+    y_pred = np.asarray(y_pred, dtype=np.int64).ravel()
+    pmax = np.asarray(pmax, dtype=np.float32).ravel()
+    emb = np.asarray(emb, dtype=np.float32)
+    P = np.asarray(P, dtype=np.float32)
+
+    n = int(y_true.size)
+    if n < 2:
+        return {"enabled": True, "n_classes_used": 0}
+
+    if y_pred.size != n or pmax.size != n:
+        raise ValueError(f"auth_macro_auc_per_identity: tamanhos incompatíveis: "
+                         f"y_true={n}, y_pred={y_pred.size}, pmax={pmax.size}")
+    if emb.shape[0] != n or P.shape[0] != n:
+        raise ValueError(f"auth_macro_auc_per_identity: tamanhos incompatíveis: "
+                         f"emb={emb.shape}, P={P.shape}, esperado N={n} na dim 0")
+
+    # ----------------------------
+    # Config
+    # ----------------------------
+    pos_pairs_per_class = int(cfg.get("pos_pairs_per_class", 30))
+    neg_pairs_per_class = int(cfg.get("neg_pairs_per_class", 60))
+    classes_fraction = float(cfg.get("classes_fraction", 1.0))
+    max_classes = int(cfg.get("max_classes", 0))
+    progress_every = int(cfg.get("progress_every", 200))
+    return_per_class = bool(cfg.get("return_per_class", False))
+
+    classes = np.unique(y_true)
+    if classes.size == 0:
+        return {"enabled": True, "n_classes_used": 0}
+
+    # amostra subconjunto de classes, se configurado
+    if 0.0 < classes_fraction < 1.0:
+        k = max(1, int(round(classes.size * classes_fraction)))
+        k = min(k, int(classes.size))
+        classes = rg.choice(classes, size=k, replace=False)
+
+    if max_classes > 0 and classes.size > max_classes:
+        classes = rg.choice(classes, size=int(max_classes), replace=False)
+
+    per_class_rows = []  # (class_id, auc_cos, auc_prob, auc_conf)
+    t0 = time.time()
+    total = int(classes.size)
+
+    for t, c in enumerate(classes.tolist(), start=1):
+        idx_c = np.flatnonzero(y_true == int(c)).astype(np.int64, copy=False)
+        if idx_c.size < 2:
+            continue
+        idx_o = np.flatnonzero(y_true != int(c)).astype(np.int64, copy=False)
+        if idx_o.size < 1:
+            continue
+
+        k_pos = int(max(0, pos_pairs_per_class))
+        k_neg = int(max(0, neg_pairs_per_class))
+        if k_pos <= 0 or k_neg <= 0:
+            continue
+
+        # --- amostra positivos (c vs c), com reposição; evita i==j
+        ii_pos = idx_c[rg.integers(0, idx_c.size, size=k_pos, dtype=np.int64)]
+        jj_pos = idx_c[rg.integers(0, idx_c.size, size=k_pos, dtype=np.int64)]
+        mask = (ii_pos == jj_pos)
+        while np.any(mask):
+            jj_pos[mask] = idx_c[rg.integers(0, idx_c.size, size=int(np.sum(mask)), dtype=np.int64)]
+            mask = (ii_pos == jj_pos)
+
+        # --- amostra negativos (c vs ~c)
+        ii_neg = idx_c[rg.integers(0, idx_c.size, size=k_neg, dtype=np.int64)]
+        jj_neg = idx_o[rg.integers(0, idx_o.size, size=k_neg, dtype=np.int64)]
+
+        ii = np.concatenate([ii_pos, ii_neg], axis=0)
+        jj = np.concatenate([jj_pos, jj_neg], axis=0)
+        truth_pairs = np.concatenate([
+            np.ones((k_pos,), dtype=np.int8),
+            np.zeros((k_neg,), dtype=np.int8),
+        ], axis=0).astype(bool, copy=False)
+
+        # scores contínuos
+        s_cos = np.sum(emb[ii] * emb[jj], axis=1)
+        s_prob = np.sum(P[ii] * P[jj], axis=1)
+        same_id = (y_pred[ii] == y_pred[jj]).astype(np.float32, copy=False)
+        conf_pair = np.minimum(pmax[ii], pmax[jj]).astype(np.float32, copy=False)
+        s_conf = (conf_pair * same_id).astype(np.float32, copy=False)
+
+        auc_cos = float(roc_auc_fast(scores=s_cos, y_true=truth_pairs))
+        auc_prob = float(roc_auc_fast(scores=s_prob, y_true=truth_pairs))
+        auc_conf = float(roc_auc_fast(scores=s_conf, y_true=truth_pairs))
+        per_class_rows.append((int(c), auc_cos, auc_prob, auc_conf))
+
+        if progress_every > 0 and (t % progress_every == 0):
+            dt = max(1e-6, time.time() - t0)
+            rate = t / dt
+            remaining = (total - t) / max(1e-9, rate)
+            print(
+                f"  [AUTH][macro-AUC] classes processadas: {t}/{total} | usadas={len(per_class_rows)} | "
+                f"vel={rate:.1f} cls/s | ETA~{remaining:.1f}s"
             )
-            yhat, _ = predict_labels(Xva, modelo["W"], modelo["b"], modelo["classes"])
-            acc = float(np.mean(yhat == yva))
-            accs.append(acc)
 
-            am = modelo["stats"].get("alpha_median")
-            if am is not None:
-                alpha_meds.append(float(am))
+    if len(per_class_rows) == 0:
+        return {"enabled": True, "n_classes_used": 0}
 
-            print(f"  [CV] l1={l1} l2={l2} fold={fold}/{k_folds} acc={acc:.4f}")
+    arr = np.asarray(per_class_rows, dtype=np.float64)
+    # colunas: 0=class_id, 1=cos, 2=prob, 3=conf
+    cos_vals = arr[:, 1]
+    prob_vals = arr[:, 2]
+    conf_vals = arr[:, 3]
 
-        mean_acc = float(np.mean(accs)) if accs else -1.0
-        alpha_med = float(np.median(alpha_meds)) if alpha_meds else None
-        print(f"[CV] l1={l1} l2={l2} -> mean_acc={mean_acc:.4f} | alpha_med~{alpha_med}")
-
-        if best is None or mean_acc > best[1]:
-            best = ((float(l1), float(l2)), mean_acc, alpha_med)
-
-    return best
-
-# ============================================================
-# TXT LOGS (config + erros) - COLAR NO FINAL DO ARQUIVO
-# ============================================================
-
-def salvar_config_logistico_txt(out_dir: Path, payload: dict, filename: str = "config_logistico.txt") -> Path:
-    """
-    Salva um .txt com:
-      - hiperparâmetros finais (best_hparams)
-      - info do CV (cv_info)
-      - resumo do treino
-    """
-    import json
-    from datetime import datetime
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Pega partes leves/úteis do payload (evita salvar mean/std gigantes, W/b, etc)
-    config_snapshot = payload.get("config_snapshot", {})
-    best_hparams = payload.get("best_hparams", {})
-    cv_info = payload.get("cv_info", {})
-    model_kind = payload.get("model_kind", "unknown")
-
-    stats = {}
-    modelo = payload.get("modelo", {})
-    if isinstance(modelo, dict):
-        st = modelo.get("stats", {}) or {}
-        # Extrato (evita alpha_epoch inteiro)
-        keys_keep = [
-            "alpha_mean", "alpha_median", "alpha_min", "alpha_max",
-            "armijo_bt_mean", "armijo_bt_max",
-            "early_stop_enabled", "early_stop_metric", "early_stop_best_metric",
-            "early_stop_best_epoch", "early_stop_stopped", "early_stop_epochs_ran",
-        ]
-        stats = {k: st.get(k) for k in keys_keep if k in st}
-
-    doc = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "model_kind": model_kind,
-        "best_hparams": best_hparams,
-        "cv_info": cv_info,
-        "train_summary_stats": stats,
-        "config_snapshot": config_snapshot,
+    out: Dict[str, Any] = {
+        "enabled": True,
+        "n_classes_used": int(arr.shape[0]),
+        "cos_mean": float(np.mean(cos_vals)),
+        "prob_mean": float(np.mean(prob_vals)),
+        "conf_mean": float(np.mean(conf_vals)),
+        "cos_median": float(np.median(cos_vals)),
+        "prob_median": float(np.median(prob_vals)),
+        "conf_median": float(np.median(conf_vals)),
     }
 
-    path = out_dir / filename
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    return path
+    if return_per_class:
+        out["per_class"] = {
+            int(cid): {"cos": float(cos), "prob": float(prob), "conf": float(conf)}
+            for (cid, cos, prob, conf) in per_class_rows
+        }
+
+    return out
 
 
-def salvar_erro_logistico_txt(out_dir: Path, payload: dict, filename: str = "erro_logistico.txt") -> Path:
+
+def _pair_dot_scores_batched(
+    A,
+    ii,
+    jj,
+    batch=None,
+    batch_size=None,
+    dtype=np.float32,
+    progress_every=100000,
+    label="pairs",
+):
+    """Calcula dot(A[ii], A[jj]) em batches com tracker de progresso.
+
+    Compatível com duas convenções de chamada:
+      - batch=...
+      - batch_size=... (como no script do MLP)
+
+    Parâmetros:
+      A: matriz (N, D) ou (N, K) (embeddings normalizados, probabilidades etc.)
+      ii, jj: índices (mesmo tamanho) para formar pares
+      batch/batch_size: tamanho do batch; se ambos vierem, batch_size tem prioridade
+      dtype: dtype do cálculo/saída
+      progress_every: imprime status a cada N pares (0 desativa)
+      label: texto no tracker
+
+    Observação:
+      Fancy-indexing materializa (batch, D). Ajustamos dinamicamente o batch para evitar
+      explosão de memória quando D é grande (ex.: milhares de classes).
     """
-    Salva um .txt com as acurácias finais em treino e teste (do payload["metrics"]).
+    if batch_size is None:
+        batch_size = batch
+    if batch_size is None:
+        batch_size = 50000
+
+    A = np.asarray(A, dtype=dtype)
+    ii = np.asarray(ii, dtype=np.int64).ravel()
+    jj = np.asarray(jj, dtype=np.int64).ravel()
+    n_pairs = int(ii.size)
+    out = np.empty((n_pairs,), dtype=dtype)
+
+    if n_pairs == 0:
+        return out
+
+    # Ajuste dinâmico de batch (limite ~120MB para Ai/Aj)
+    try:
+        bytes_per = np.dtype(dtype).itemsize
+    except Exception:
+        bytes_per = 4
+    max_bytes = 120 * 1024 * 1024
+    if A.ndim == 2 and A.shape[1] > 0:
+        d = int(A.shape[1])
+        max_elems = max(1, max_bytes // max(1, bytes_per))
+        batch_size = min(int(batch_size), max(1, max_elems // d))
+    else:
+        batch_size = int(max(1, batch_size))
+
+    progress_every = int(progress_every) if progress_every else 0
+    done = 0
+    t0 = time.time()
+
+    for start in range(0, n_pairs, batch_size):
+        end = min(n_pairs, start + batch_size)
+        Ai = A[ii[start:end]]
+        Aj = A[jj[start:end]]
+        out[start:end] = np.einsum("ij,ij->i", Ai, Aj, optimize=True).astype(dtype, copy=False)
+
+        done = end
+        if progress_every and (done == n_pairs or (done % progress_every) == 0):
+            pct = 100.0 * done / float(n_pairs)
+            dt = max(1e-9, time.time() - t0)
+            rate = done / dt
+            eta = (n_pairs - done) / max(1e-9, rate)
+            print(
+                f"    [AUC-pairs] {label}: {done}/{n_pairs} ({pct:.1f}%) | "
+                f"{rate:,.0f} pares/s | ETA~{eta:,.1f}s"
+            )
+
+    return out
+
+
+
+
+
+def roc_curve_simple(scores: np.ndarray, truth: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
-    from datetime import datetime
+    ROC simples (sem sklearn). Retorna fpr, tpr, thresholds, auc.
+    truth: 1/0
+    """
+    scores = np.asarray(scores, dtype=np.float32).ravel()
+    truth = np.asarray(truth, dtype=np.int8).ravel()
+    if scores.size == 0:
+        return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32), 0.0
 
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    thrs = np.unique(scores)[::-1]
+    thrs = np.concatenate(([float(np.max(scores) + 1.0)], thrs, [float(np.min(scores) - 1.0)])).astype(np.float32)
 
-    model_kind = payload.get("model_kind", "unknown")
-    best_hparams = payload.get("best_hparams", {})
-    cv_info = payload.get("cv_info", {})
-    metrics = payload.get("metrics", {}) or {}
+    Ppos = float(np.sum(truth == 1))
+    Nneg = float(np.sum(truth == 0))
+    tpr = []
+    fpr = []
+    for thr in thrs:
+        pred = scores >= float(thr)
+        cm = _binary_counts_from_pred_truth(pred, truth == 1)
+        TP = cm["TP"]; FP = cm["FP"]
+        tpr.append(TP / Ppos if Ppos > 0 else 0.0)
+        fpr.append(FP / Nneg if Nneg > 0 else 0.0)
 
-    acc_tr = metrics.get("acc_train_final_sample", float("nan"))
-    acc_te = metrics.get("acc_test", float("nan"))
+    fpr = np.asarray(fpr, dtype=np.float32)
+    tpr = np.asarray(tpr, dtype=np.float32)
 
-    lines = []
-    lines.append(f"generated_at: {datetime.now().isoformat(timespec='seconds')}")
-    lines.append(f"model_kind: {model_kind}")
-    lines.append(f"best_hparams: {best_hparams}")
-    if cv_info:
-        lines.append(f"cv_info: {cv_info}")
-    lines.append("")
-    lines.append("FINAL ACCURACY")
-    lines.append(f"train_acc (final sample): {acc_tr:.6f}" if acc_tr == acc_tr else "train_acc (final sample): nan")
-    lines.append(f"test_acc:                {acc_te:.6f}" if acc_te == acc_te else "test_acc:                nan")
-    lines.append("")
+    order = np.argsort(fpr)
+    fpr = fpr[order]
+    tpr = tpr[order]
+    auc = float(np.trapezoid(tpr, fpr)) if fpr.size > 1 else 0.0
+    return fpr, tpr, thrs.astype(np.float32), auc
 
-    path = out_dir / filename
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
 
+def plot_roc_ova_for_classes(pick_classes, y_true: np.ndarray, proba: np.ndarray,
+                            classes_modelo: np.ndarray, out_dir: Path, roc_cfg: Dict[str, Any]):
+    """Plota ROC one-vs-all (score = probabilidade da classe)."""
+    if not roc_cfg or not bool(roc_cfg.get("enable", True)):
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"[ROC] Falha ao importar matplotlib ({e}). Pulando ROC.")
+        return
+
+    y_true = np.asarray(y_true, dtype=np.int64)
+    proba = np.asarray(proba, dtype=np.float32)
+    classes_modelo = np.asarray(classes_modelo, dtype=np.int64)
+    pick_classes = [int(c) for c in pick_classes]
+
+    plt.figure()
+    any_curve = False
+    for c in pick_classes:
+        idx = np.where(classes_modelo == int(c))[0]
+        if idx.size == 0:
+            continue
+        k = int(idx[0])
+        scores = proba[:, k]
+        truth = (y_true == int(c)).astype(np.int8)
+        fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
+        if fpr.size == 0:
+            continue
+        any_curve = True
+        plt.plot(fpr, tpr, label=f"c={c} AUC={auc:.3f}")
+
+    if not any_curve:
+        print("[ROC] Sem curvas para plotar.")
+        return
+
+    plt.plot([0, 1], [0, 1], linestyle="--", label="aleatório")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC One-vs-All (10 classes) - LogReg")
+    plt.legend(loc="lower right")
+
+    if bool(roc_cfg.get("save_png", True)):
+        png_name = str(roc_cfg.get("png_name", "roc_ova_10classes_logreg.png"))
+        out_path = out_dir / png_name
+        try:
+            plt.savefig(out_path, dpi=160, bbox_inches="tight")
+            print(f"[ROC] PNG salvo em: {out_path}")
+        except Exception as e:
+            print(f"[ROC] Falha ao salvar PNG ({e}).")
+
+    if bool(roc_cfg.get("show_plots", True)):
+        plt.show()
+    else:
+        plt.close()
 
 
 # ============================================================
-# MAIN
+# Split / reconstrução de avaliação (idêntico ao MLP Eval)
 # ============================================================
 
-def main():
-    path = CONFIG["dataset_path"]
-    print("Dataset path:", path)
-    print("Exists?", Path(path).exists())
-
-    X, y = carregar_dataset(path)
-    print("\n[Info] Dataset original")
-    print("X:", X.shape, X.dtype)
-    print("y:", y.shape, y.dtype)
-    print("n classes:", len(np.unique(y)))
-
-    # 1) classes elegíveis e seleção
-    classes_elig = selecionar_classes_elegiveis(y, CONFIG["min_amostras_por_classe"])
-    print(f"\n[Etapa 1] Classes elegíveis (>= {CONFIG['min_amostras_por_classe']}): {len(classes_elig)}")
-    classes_sel = amostrar_classes(classes_elig, CONFIG["frac_classes"], CONFIG["seed_classes"])
-    print(f"[Etapa 1] Classes selecionadas: {len(classes_sel)} (frac={CONFIG['frac_classes']})")
-    X, y = filtrar_por_classes(X, y, classes_sel)
-    print(f"[Etapa 1] Após filtro: X={X.shape} | classes={len(np.unique(y))}")
-
-    # 2) split treino/teste
-    print(f"\n[Etapa 2] Split treino/teste test_frac={CONFIG['test_frac']}")
-    X_train_all, X_test_all, y_train_all, y_test_all = train_test_split(
-        X, y,
-        test_size=float(CONFIG["test_frac"]),
-        random_state=int(CONFIG["seed_split"]),
+def _train_test_split_with_meta(X: np.ndarray, y: np.ndarray,
+                                paths: Optional[np.ndarray], ids: Optional[np.ndarray],
+                                test_size: float, seed: int):
+    idx = np.arange(y.size, dtype=np.int64)
+    idx_tr, idx_te = train_test_split(
+        idx,
+        test_size=float(test_size),
+        random_state=int(seed),
         stratify=y,
     )
-    print(f"[Etapa 2] Train(all): {X_train_all.shape} | classes={len(np.unique(y_train_all))}")
-    print(f"[Etapa 2] Test (all):  {X_test_all.shape} | classes={len(np.unique(y_test_all))}")
 
-    # 3) filtrar classes no treino com >= max(min_train_por_classe, k_folds)
-    min_train = int(max(CONFIG["min_train_por_classe"], CONFIG["k_folds"]))
+    def take(a, idx_):
+        return a[idx_] if a is not None else None
+
+    return (X[idx_tr], X[idx_te],
+            y[idx_tr], y[idx_te],
+            take(paths, idx_tr), take(paths, idx_te),
+            take(ids, idx_tr), take(ids, idx_te))
+
+
+def build_eval_split_from_payload(X: np.ndarray, y: np.ndarray,
+                                  paths: Optional[np.ndarray],
+                                  ids: Optional[np.ndarray],
+                                  payload_conf: Dict[str, Any],
+                                  standardizer: Dict[str, Any],
+                                  classes_modelo: np.ndarray):
+    idx_global = np.arange(y.size, dtype=np.int64)
+
+    classes_elig = selecionar_classes_elegiveis(y, int(payload_conf["min_amostras_por_classe"]))
+    classes_sel = amostrar_classes(classes_elig, float(payload_conf["frac_classes"]), int(payload_conf["seed_classes"]))
+    X1, y1, p1, id1, _ = filtrar_por_classes(X, y, classes_sel, paths=paths, ids=ids, idx_global=idx_global)
+
+    X_train_all, X_test_all, y_train_all, y_test_all, p_train_all, p_test_all, id_train_all, id_test_all = \
+        _train_test_split_with_meta(
+            X1, y1, p1, id1,
+            test_size=float(payload_conf["test_frac"]),
+            seed=int(payload_conf["seed_split"]),
+        )
+
+    min_train = int(max(int(payload_conf["min_train_por_classe"]), int(payload_conf["k_folds"])))
     cls, cts = np.unique(y_train_all, return_counts=True)
     cls_keep = cls[cts >= min_train]
-    X_train, y_train = filtrar_por_classes(X_train_all, y_train_all, cls_keep)
-    X_test, y_test = filtrar_por_classes(X_test_all, y_test_all, np.unique(y_train))
-    print(f"\n[Etapa 3] Train(filtrado): {X_train.shape} | classes={len(np.unique(y_train))}")
-    print(f"[Etapa 3] Test(alinhado):  {X_test.shape} | classes={len(np.unique(y_test))}")
 
-    # 4) padronização
-    print("\n[Etapa 4] Padronizando (z-score) com stats do TREINO.")
-    mean_tr, std_tr = fit_standardizer(X_train, eps=float(CONFIG["eps_std"]))
-    X_train_feat = apply_standardizer(X_train, mean_tr, std_tr)
-    X_test_feat = apply_standardizer(X_test, mean_tr, std_tr)
+    X_train, y_train, p_train, id_train, _ = filtrar_por_classes(X_train_all, y_train_all, cls_keep,
+                                                                 paths=p_train_all, ids=id_train_all,
+                                                                 idx_global=None)
+    cls_train = np.unique(y_train).astype(np.int64, copy=False)
+    X_test, y_test, p_test, id_test, _ = filtrar_por_classes(X_test_all, y_test_all, cls_train,
+                                                             paths=p_test_all, ids=id_test_all,
+                                                             idx_global=None)
 
-    # 5) monta amostra para CV
-    k = int(CONFIG["k_folds"])
-    min_cv = int(CONFIG["cv_min_por_classe"] if CONFIG["cv_min_por_classe"] is not None else k)
+    mean = np.asarray(standardizer["mean"], dtype=np.float32)
+    std = np.asarray(standardizer["std"], dtype=np.float32)
+    X_test_feat = apply_standardizer(X_test, mean, std)
 
-    # opcional: limita classes para CV (para deixar mais rápido)
-    X_train_cv_src, y_train_cv_src = limitar_classes_para_cv(X_train_feat, y_train, CONFIG["cv_max_classes"], seed=int(CONFIG["seed_split"]))
-
-    idx_cv, _ = amostrar_com_min_por_classe(
-        y=y_train_cv_src,
-        frac=float(CONFIG["cv_frac"]),
-        seed=int(CONFIG["seed_split"]),
-        min_por_classe=min_cv,
+    X_test_final, y_test_final, p_test_final, id_test_final, _ = filtrar_por_classes(
+        X_test_feat, y_test, classes_modelo,
+        paths=p_test, ids=id_test, idx_global=None
     )
-    if idx_cv.size == 0:
-        raise RuntimeError("Amostra CV vazia. Ajuste cv_frac/cv_max_classes/k_folds/min_amostras.")
-    X_cv = X_train_cv_src[idx_cv]
-    y_cv = y_train_cv_src[idx_cv]
-    _, cts_cv = np.unique(y_cv, return_counts=True)
-    print(f"\n[Etapa 5] CV sample: X={X_cv.shape} | classes={len(np.unique(y_cv))} | min_count={int(cts_cv.min())}")
-    target = int(np.ceil(float(CONFIG["cv_frac"]) * y_train_cv_src.shape[0]))
-    min_needed = int(len(np.unique(y_train_cv_src)) * min_cv)
-    if target < min_needed:
-        print(f"[Aviso] cv_frac implica alvo~{target}, mas mínimo por classe exige >= {min_needed}. "
-              f"O CV vai usar pelo menos {min_needed} amostras. Para acelerar: reduza frac_classes ou use cv_max_classes.")
+    return X_test_final, y_test_final, p_test_final, id_test_final
 
-    # 6) CV grid-search
-    print(f"\n[Etapa 6] CV grid-search | epochs_cv={CONFIG['epochs_cv']} batch_size_cv={CONFIG['batch_size_cv']}")
-    (best_l1, best_l2), best_acc, alpha_med = escolher_melhores_lambdas_por_cv(
-        X_cv=X_cv,
-        y_cv=y_cv,
-        k_folds=k,
-        grid_l1=CONFIG["grid_l1"],
-        grid_l2=CONFIG["grid_l2"],
-        epochs_cv=int(CONFIG["epochs_cv"]),
-        batch_size_cv=int(CONFIG["batch_size_cv"]),
-        seed=int(CONFIG["seed_split"]),
+
+def main():
+    rng = np.random.default_rng(int(SCRIPT_CONFIG["seed"]))
+
+    out_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
+    payload_path = out_dir / str(SCRIPT_CONFIG["model_payload_file"])
+
+    if not payload_path.exists():
+        raise FileNotFoundError(f"Não achei o payload do modelo em: {payload_path}")
+
+    payload = joblib.load(payload_path)
+    if not isinstance(payload, dict) or "modelo" not in payload or "classes_usadas" not in payload:
+        raise ValueError("Payload do modelo inválido. Esperado dict com chaves 'modelo' e 'classes_usadas'.")
+
+    modelo = payload["modelo"]
+    classes_modelo_payload = np.asarray(payload["classes_usadas"], dtype=np.int64)
+    standardizer = payload.get("standardizer", None)
+    conf = payload.get("config_snapshot", {}) or {}
+
+    # usa a ordem de classes do próprio modelo (colunas de W), se houver
+    if isinstance(modelo, dict) and "classes" in modelo:
+        classes_modelo = np.asarray(modelo["classes"], dtype=np.int64)
+        if classes_modelo.size != classes_modelo_payload.size or np.any(classes_modelo != classes_modelo_payload):
+            print("[WARN] classes_usadas (payload) difere de modelo['classes']. Usando modelo['classes'] como referência.")
+    else:
+        classes_modelo = classes_modelo_payload
+
+    print("\n[LOAD] Payload do modelo carregado com sucesso!")
+    print("  arquivo:", payload_path)
+    print("  n_classes_modelo:", int(classes_modelo.size))
+
+    n_show = min(20, classes_modelo.size)
+    print("\n[INFO] 20 IDs de classes (exemplo):")
+    print(" ", classes_modelo[:n_show].tolist())
+
+    print("\n[INFO] Exemplos de parâmetros do modelo (LogReg):")
+    W = np.asarray(modelo["W"])
+    b = np.asarray(modelo["b"])
+    print(f"  W: {tuple(W.shape)} | b: {tuple(b.shape)}")
+    if "best_hparams" in payload:
+        print("  best_hparams(payload):", payload["best_hparams"])
+    if "metrics" in payload:
+        print("  metrics(payload):", payload["metrics"])
+    if "cv_info" in payload:
+        print("  cv_info(payload):", payload["cv_info"])
+    if "model_kind" in payload:
+        print("  model_kind:", payload["model_kind"])
+
+    if standardizer is None or "mean" not in standardizer or "std" not in standardizer:
+        raise ValueError("Payload não contém 'standardizer' com mean/std; não dá para padronizar em inferência.")
+
+    dataset_path = SCRIPT_CONFIG.get("dataset_path_override") or conf.get("dataset_path", None)
+    if dataset_path is None:
+        raise ValueError("Não achei 'dataset_path' no config_snapshot e não há override no SCRIPT_CONFIG.")
+    dataset_path = str(dataset_path)
+
+    print("\n[DATA] Carregando dataset HOG joblib...")
+    print("  path:", dataset_path)
+    X, y, meta = carregar_dataset_joblib(dataset_path)
+    paths = meta.get("paths", None)
+    ids = meta.get("ids", None)
+    print("  X:", X.shape, X.dtype, "| y:", y.shape, y.dtype)
+    print("  n_classes_total:", int(np.unique(y).size))
+
+    # reconstruir split de avaliação (teste alinhado)
+    print("\n[SPLIT] Reconstruindo conjunto de avaliação (teste alinhado ao modelo)...")
+    X_eval, y_eval, _p_eval, _id_eval = build_eval_split_from_payload(
+        X=X, y=y,
+        paths=paths if isinstance(paths, np.ndarray) else None,
+        ids=ids if isinstance(ids, np.ndarray) else None,
+        payload_conf=conf,
+        standardizer=standardizer,
+        classes_modelo=classes_modelo,
     )
-    print(f"\n[CV] Melhor: l1={best_l1} l2={best_l2} mean_acc={best_acc:.4f} alpha_med~{alpha_med}")
+    print("  X_eval:", X_eval.shape, X_eval.dtype)
+    print("  y_eval:", y_eval.shape, y_eval.dtype, "| classes_present:", int(np.unique(y_eval).size))
+    if y_eval.size > 0:
+        print(f"  N={int(y_eval.size)} (IDs válidos: 0..{int(y_eval.size)-1})")
+    # =========================
+    # TUNING (TREINO) para autenticação (anti-leakage)
+    # =========================
+    print("\n[SPLIT] Reconstruindo conjunto de TUNING (treino alinhado ao modelo) para autenticação (anti-leakage)...")
 
-    # 7) treino final
-    print(f"\n[Etapa 7] Treino final | final_frac={CONFIG['final_frac']} epochs_final={CONFIG['epochs_final']}")
-    idx_final, _ = amostrar_com_min_por_classe(
-        y=y_train,
-        frac=float(CONFIG["final_frac"]),
-        seed=int(CONFIG["seed_split"]) + 999,
-        min_por_classe=int(CONFIG["final_min_por_classe"]),
+    idx_global_tune = np.arange(y.size, dtype=np.int64)
+
+    classes_elig_tune = selecionar_classes_elegiveis(y, int(conf["min_amostras_por_classe"]))
+    classes_sel_tune = amostrar_classes(classes_elig_tune, float(conf["frac_classes"]), int(conf["seed_classes"]))
+
+    X1_t, y1_t, p1_t, id1_t, _ = filtrar_por_classes(
+        X, y, classes_sel_tune,
+        paths=paths if isinstance(paths, np.ndarray) else None,
+        ids=ids if isinstance(ids, np.ndarray) else None,
+        idx_global=idx_global_tune
     )
-    X_final = X_train_feat[idx_final]
-    y_final = y_train[idx_final]
-    classes_final = np.unique(y_final).astype(np.int64, copy=False)
 
-    # alinhar teste às classes do modelo final (se final_frac<1)
-    X_test_final, y_test_final = filtrar_por_classes(X_test_feat, y_test, classes_final)
+    X_train_all_t, X_test_all_t, y_train_all_t, y_test_all_t, p_train_all_t, p_test_all_t, id_train_all_t, id_test_all_t = \
+        _train_test_split_with_meta(
+            X1_t, y1_t, p1_t, id1_t,
+            test_size=float(conf["test_frac"]),
+            seed=int(conf["seed_split"]),
+        )
 
-    print(f"[Etapa 7] Final sample: X={X_final.shape} | classes={len(classes_final)}")
-    print(f"[Etapa 7] Test alinhado: X={X_test_final.shape} | classes={len(np.unique(y_test_final))}")
+    min_train_t = int(max(int(conf["min_train_por_classe"]), int(conf["k_folds"])))
+    cls_t, cts_t = np.unique(y_train_all_t, return_counts=True)
+    cls_keep_t = cls_t[cts_t >= min_train_t]
 
-    # --- Cria monitor subset do treino final (sem remover do treino) ---
-    X_mon, y_mon = None, None
-    if bool(CONFIG["earlystop_final_enable"]):
-        n_tr = int(X_final.shape[0])
-        frac = float(CONFIG["earlystop_final_monitor_frac"])
-        maxn = int(CONFIG["earlystop_final_monitor_max"])
-        n_mon = int(np.ceil(frac * n_tr))
-        n_mon = max(1, min(n_mon, maxn))
-        if n_mon >= n_tr:
-            X_mon, y_mon = X_final, y_final
+    X_train_t, y_train_t, p_train_t, id_train_t, _ = filtrar_por_classes(
+        X_train_all_t, y_train_all_t, cls_keep_t,
+        paths=p_train_all_t, ids=id_train_all_t,
+        idx_global=None
+    )
+
+    mean = np.asarray(standardizer["mean"], dtype=np.float32)
+    std = np.asarray(standardizer["std"], dtype=np.float32)
+    X_train_feat_t = apply_standardizer(X_train_t, mean, std)
+
+    X_tune, y_tune, _p_tune, _id_tune, _ = filtrar_por_classes(
+        X_train_feat_t, y_train_t, classes_modelo,
+        paths=p_train_t, ids=id_train_t, idx_global=None
+    )
+
+    print("  X_tune:", X_tune.shape, X_tune.dtype)
+    print("  y_tune:", y_tune.shape, y_tune.dtype, "| classes_present:", int(np.unique(y_tune).size))
+
+
+    # -------------------------
+    # Anti-leakage check: nenhum exemplo do tuning pode estar no eval/teste
+    # (se o dataset tiver ids/paths).
+    # -------------------------
+    try:
+        if (_id_eval is not None) and (_id_tune is not None):
+            inter = np.intersect1d(np.asarray(_id_eval).ravel(), np.asarray(_id_tune).ravel())
+            if inter.size > 0:
+                raise RuntimeError(f"[LEAKAGE] Detected overlap between TUNING and EVAL sets: {int(inter.size)} samples.")
+    except Exception as e:
+        # se ids não estiverem disponíveis ou houver problemas de tipo, apenas avisa.
+        print(f"[LEAKAGE] overlap check skipped/failed: {e}")
+
+
+    # =========================
+    # IDENTIFICAÇÃO
+    # =========================
+    y_pred, P, logits = predict_labels_logreg(X_eval, modelo)
+    acc = accuracy(y_eval, y_pred)
+    print("\n[IDENTIFICAÇÃO] Acurácia no conjunto de avaliação:")
+    print(f"  acc={acc:.4f} ({int(np.sum(y_eval == y_pred))}/{int(y_eval.size)})")
+
+    # one-vs-all
+    n_ova = int(SCRIPT_CONFIG["one_vs_all_n_classes"])
+    classes_present = np.unique(y_eval).astype(np.int64, copy=False)
+    n_pick = min(n_ova, int(classes_present.size))
+    pick = rng.choice(classes_present, size=n_pick, replace=False) if n_pick > 0 else np.array([], dtype=np.int64)
+
+    print(f"\n[IDENTIFICAÇÃO] One-vs-all ({n_pick} classes aleatórias): classes={pick.tolist()}")
+    for c in pick.tolist():
+        cm = confusion_one_vs_all(y_eval, y_pred, int(c))
+        print_confusion_binary(title=f"[One-vs-all] classe={int(c)}", cm=cm)
+
+    # ROC (one-vs-all) para as mesmas classes escolhidas acima
+    plot_roc_ova_for_classes(
+        pick_classes=pick.tolist(),
+        y_true=y_eval,
+        proba=P,
+        classes_modelo=classes_modelo,
+        out_dir=out_dir,
+        roc_cfg=SCRIPT_CONFIG.get("roc", {}) or {}
+    )
+
+    # =========================
+    # AUTENTICAÇÃO
+    # =========================
+    print("\n[AUTH] Extraindo embeddings (logits normalizados)...")
+    emb = extract_embeddings_logits(X_eval, modelo)
+    pmax = np.max(P, axis=1).astype(np.float32, copy=False)
+
+    auth_cfg = SCRIPT_CONFIG.get("auth", {}) or {}
+    tune_metric = str(auth_cfg.get("tune_metric", "f1")).strip().lower()
+    if tune_metric not in ("f1", "balanced_acc", "acc"):
+        tune_metric = "f1"
+
+    print("[AUTH] Tuning balanceado de thresholds ...")
+    # (anti-leakage) o tuning de thresholds deve usar TREINO (X_tune/y_tune), não o TESTE (X_eval/y_eval)
+    y_pred_tune, P_tune, logits_tune = predict_labels_logreg(X_tune, modelo)
+    emb_tune = extract_embeddings_logits(X_tune, modelo)
+    pmax_tune = np.max(P_tune, axis=1).astype(np.float32, copy=False)
+
+    ii_t, jj_t, tt_t, pair_info = build_tuning_pairs(
+        y_tune, rng=rng,
+        pos_pairs_per_class=int(auth_cfg.get("pos_pairs_per_class", 50)),
+        neg_pairs_total=int(auth_cfg.get("neg_pairs_total", 20000)),
+        balanced=True
+    )
+
+    if int(pair_info.get("pairs_used", 0)) == 0:
+        print("[AUTH] Sem pares suficientes para tuning. Usando thresholds padrão.")
+        thr_cos = 0.5
+        thr_prob = 0.5
+        thr_conf = 0.5
+    else:
+        sims_cos = _pair_dot_scores_batched(
+            A=emb_tune, ii=ii_t, jj=jj_t,
+            label="cosine(logits_norm) [tuning]",
+            batch_size=100000,
+            progress_every=100000,
+        ).astype(np.float32, copy=False)
+        sims_prob = _pair_dot_scores_batched(
+            A=P_tune, ii=ii_t, jj=jj_t,
+            label="prob_dot [tuning]",
+            batch_size=100000,
+            progress_every=100000,
+        ).astype(np.float32, copy=False)
+
+        pos_mask = (tt_t == 1)
+        neg_mask = (tt_t == 0)
+        print(f"  pares tuning: {pair_info} | métrica otimizada: {tune_metric}")
+
+        # print sim_pos vs sim_neg
+        print("\n  [SCORES] cosine(logits): pos vs neg")
+        print("    pos:", _score_summary(sims_cos[pos_mask]))
+        print("    neg:", _score_summary(sims_cos[neg_mask]))
+        print("\n  [SCORES] prob_dot(softmax): pos vs neg")
+        print("    pos:", _score_summary(sims_prob[pos_mask]))
+        print("    neg:", _score_summary(sims_prob[neg_mask]))
+
+        thr_cos, stats_cos = tune_threshold_scores(
+            sims_cos, tt_t, q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
+        )
+        thr_prob, stats_prob = tune_threshold_scores(
+            sims_prob, tt_t, q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
+        )
+        thr_conf, stats_conf = tune_threshold_identity_confidence(
+            y_pred=y_pred_tune, pmax=pmax_tune,
+            ii=ii_t, jj=jj_t, truth=tt_t,
+            q_grid=int(auth_cfg.get("threshold_grid_q", 401)), metric=tune_metric
+        )
+
+        print("\n  [TUNING] cosine(logits):", {k: stats_cos.get(k) for k in ("metric_optimized","best_metric_value","best_thr","best_cm","best_metrics")})
+        print("  [TUNING] prob_dot:", {k: stats_prob.get(k) for k in ("metric_optimized","best_metric_value","best_thr","best_cm","best_metrics")})
+        print("  [TUNING] id+conf:", {k: stats_conf.get(k) for k in ("metric_optimized","best_metric_value","best_thr","best_cm","best_metrics")})
+
+    eval_mode = str(auth_cfg.get("eval_mode", "auto")).lower()
+    full_if_n_leq = int(auth_cfg.get("full_if_n_leq", 2500))
+    n = int(y_eval.size)
+    use_full = (eval_mode == "full") or (eval_mode == "auto" and n <= full_if_n_leq)
+    print(f"\n[AUTH] Avaliação em pares: mode={'full' if use_full else 'sample'} | N={n}")
+    # =========================
+    # AUTENTICAÇÃO / VERIFICAÇÃO (pares)
+    # =========================
+    # Pipeline (análogo ao script de MLP):
+    # 1) Extraímos "embeddings" (aqui: logits normalizados) e probabilidades por classe.
+    # 2) Ajustamos thresholds no conjunto de tuning (X_tune/y_tune), evitando leakage.
+    # 3) Avaliamos em pares. Para N grande, amostramos pares para evitar O(N^2).
+    # 4) Calculamos AUC ROC em pares com algoritmo O(n log n) (roc_auc_fast), pois
+    #    enumerar todos os thresholds únicos não escala quando n_pairs é grande.
+    #
+    # Referências (fundamentos / contexto):
+    # - C. Bishop; Hastie/Tibshirani/Friedman (classificação e probabilidades).
+    # - T. Fawcett, 2006 (ROC/AUC).
+    # - Schroff et al., "FaceNet" (embeddings + cosine para verificação), 2015.
+    # - Deng et al., "ArcFace" / Wang et al., "CosFace" (margens em espaço angular), 2018.
+    #
+    # Importante: AUC de AUTENTICAÇÃO aqui é em PARES (mesma identidade?),
+    # não confundir com AUC macro one-vs-rest de IDENTIFICAÇÃO.
+    pairs_fraction = float(auth_cfg.get("pairs_fraction", 1.0))
+    if not (0.0 < pairs_fraction <= 1.0):
+        pairs_fraction = 1.0
+
+    # número base de pares quando N é grande
+    base_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
+    n_pairs_eval = int(max(1, round(base_pairs * pairs_fraction))) if base_pairs > 0 else 0
+
+    if use_full:
+        res_cos = eval_auth_pairs_full(emb, y_eval, thr_cos)
+        res_prob = eval_auth_pairs_full_prob(P, y_eval, thr_prob)
+        res_conf = eval_auth_pairs_full_identity_confidence(y_pred, pmax, y_eval, thr_conf)
+
+        # ---- AUC em pares amostrados (mesma identidade?) ----
+        if n_pairs_eval > 0 and n > 1:
+            ii_a, jj_a = _sample_pairs_uniform(n=n, rng=rng, n_pairs=n_pairs_eval)
+            truth_a = (y_eval[ii_a] == y_eval[jj_a]).astype(np.int8, copy=False)
+
+            sims_cos_a = _pair_dot_scores_batched(
+                A=emb, ii=ii_a, jj=jj_a,
+                label="cosine(logits_norm) [AUC]",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+
+            sims_prob_a = _pair_dot_scores_batched(
+                A=P, ii=ii_a, jj=jj_a,
+                label="prob_dot [AUC]",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+
+            same_id_a = (y_pred[ii_a] == y_pred[jj_a])
+            conf_a = np.minimum(pmax[ii_a], pmax[jj_a]).astype(np.float32, copy=False)
+            score_conf_a = (conf_a * same_id_a.astype(np.float32)).astype(np.float32, copy=False)
+
+            auc_cos = roc_auc_fast(scores=sims_cos_a, y_true=(truth_a == 1))
+            auc_prob = roc_auc_fast(scores=sims_prob_a, y_true=(truth_a == 1))
+            auc_conf = roc_auc_fast(scores=score_conf_a, y_true=(truth_a == 1))
+
+            print("\n[AUTH] ROC-AUC (pares amostrados):")
+            print(f"  cosine(logits_norm): {auc_cos:.6f} | prob_dot: {auc_prob:.6f} | id+conf: {auc_conf:.6f} | n_pairs={int(truth_a.size)}")
+
+        # ---- Macro ROC-AUC por identidade (one-vs-all em pares) ----
+        macro_cfg = auth_cfg.get("macro_auc", {}) or {}
+        if bool(macro_cfg.get("enable", True)):
+            print("\n[AUTH] Macro ROC-AUC por identidade (one-vs-all, em pares):")
+            mac = auth_macro_auc_per_identity(
+                y=y_eval, y_pred=y_pred, pmax=pmax, emb=emb, P=P, rng=rng, cfg=macro_cfg
+            )
+            if mac is None or len(mac) == 0 or not bool(mac.get("enabled", True)):
+                print("  (não foi possível calcular)")
+            else:
+                n_ids = int(mac.get("n_classes_used", 0))
+                print(
+                    f"  cos_mean={float(mac.get('cos_mean', float('nan'))):.6f} | "
+                    f"prob_mean={float(mac.get('prob_mean', float('nan'))):.6f} | "
+                    f"conf_mean={float(mac.get('conf_mean', float('nan'))):.6f} | "
+                    f"n_ids={n_ids}"
+                )
+                print(
+                    f"  cos_median={float(mac.get('cos_median', float('nan'))):.6f} | "
+                    f"prob_median={float(mac.get('prob_median', float('nan'))):.6f} | "
+                    f"conf_median={float(mac.get('conf_median', float('nan'))):.6f}"
+                )
+    else:
+        # Amostramos UMA vez e reaproveitamos os mesmos pares para:
+        # - métricas por threshold (cosine / prob_dot / id+conf)
+        # - AUC (threshold-var) para cada score
+        if n_pairs_eval <= 0 or n <= 1:
+            # fallback (deveria ser raro)
+            res_cos = eval_auth_pairs_sample(emb, y_eval, thr_cos, rng=rng, n_pairs=max(1, base_pairs))
+            res_prob = {"mode": "sample", "pairs": int(res_cos.get("pairs", 0)), "thr": float(thr_prob), "TP": 0, "TN": 0, "FP": 0, "FN": 0, "m_acc": float("nan"), "m_f1": float("nan"), "m_balanced_acc": float("nan")}
+            res_conf = {"mode": "sample", "pairs": int(res_cos.get("pairs", 0)), "thr": float(thr_conf), "TP": 0, "TN": 0, "FP": 0, "FN": 0, "m_acc": float("nan"), "m_f1": float("nan"), "m_balanced_acc": float("nan")}
         else:
-            y_tmp = y_final
-            sss = StratifiedShuffleSplit(n_splits=1, train_size=n_mon, random_state=int(CONFIG["earlystop_final_monitor_seed"]))
-            mon_rel, _ = next(sss.split(np.zeros(n_tr), y_tmp))
-            X_mon, y_mon = X_final[mon_rel], y_final[mon_rel]
-        print(f"[EARLY STOP FINAL] Monitor: X={X_mon.shape} | classes={len(np.unique(y_mon))}")
+            ii_s, jj_s = _sample_pairs_uniform(n=n, rng=rng, n_pairs=n_pairs_eval)
+            truth_s = (y_eval[ii_s] == y_eval[jj_s]).astype(np.int8, copy=False)
 
-    modelo = treinar_softmax_elasticnet_sgd(
-        X_train=X_final,
-        y_train=y_final,
-        classes_modelo=classes_final,
-        l1=float(best_l1),
-        l2=float(best_l2),
-        epochs=int(CONFIG["epochs_final"]),
-        batch_size=int(CONFIG["batch_size_final"]),
-        seed=int(CONFIG["seed_split"]) + 2025,
-        use_armijo=True,
+            # ---- cosine(logits_norm) ----
+            sims_cos = _pair_dot_scores_batched(
+                A=emb, ii=ii_s, jj=jj_s,
+                label="cosine(logits_norm)",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+            pred_cos = sims_cos >= float(thr_cos)
+            cm_cos = _binary_counts_from_pred_truth(y_pred=pred_cos, y_true=truth_s)
+            mets_cos = _binary_metrics_from_counts(cm_cos)
+            res_cos = {"mode": "sample", "pairs": int(ii_s.size), "thr": float(thr_cos), **cm_cos, **{f"m_{k}": float(v) for k, v in mets_cos.items()}}
 
-        # --- Early stopping no treino final (monitor subset) ---
-        X_val=X_mon,
-        y_val=y_mon,
-        earlystop_enable=bool(CONFIG["earlystop_final_enable"]),
-        earlystop_metric=str(CONFIG["earlystop_final_metric"]),
-        earlystop_warmup=int(CONFIG["earlystop_final_warmup"]),
-        earlystop_patience=int(CONFIG["earlystop_final_patience"]),
-        earlystop_min_delta=float(CONFIG["earlystop_final_min_delta"]),
-        earlystop_restore_best=bool(CONFIG["earlystop_final_restore_best"]),
-        earlystop_val_max=None,  # monitor já é controlado pelo monitor_frac/max
-    )
+            # ---- prob_dot ----
+            sims_prob = _pair_dot_scores_batched(
+                A=P, ii=ii_s, jj=jj_s,
+                label="prob_dot",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+            pred_prob = sims_prob >= float(thr_prob)
+            cm_prob = _binary_counts_from_pred_truth(y_pred=pred_prob, y_true=truth_s)
+            mets_prob = _binary_metrics_from_counts(cm_prob)
+            res_prob = {"mode": "sample", "pairs": int(ii_s.size), "thr": float(thr_prob), **cm_prob, **{f"m_{k}": float(v) for k, v in mets_prob.items()}}
 
-    st = modelo["stats"]
-    print("\n[Armijo FINAL] alpha_median=", st["alpha_median"], " bt_mean=", st["armijo_bt_mean"], " bt_max=", st["armijo_bt_max"])
-    if st.get("early_stop_enabled"):
-        print("[EARLY STOP FINAL] best_epoch=", st.get("early_stop_best_epoch"),
-              " best_metric=", st.get("early_stop_best_metric"),
-              " stopped=", st.get("early_stop_stopped"),
-              " epochs_ran=", st.get("early_stop_epochs_ran"))
+            # ---- id+conf ----
+            same_id = (y_pred[ii_s] == y_pred[jj_s])
+            conf_s = np.minimum(pmax[ii_s], pmax[jj_s]).astype(np.float32, copy=False)
+            pred_conf = same_id & (conf_s >= float(thr_conf))
+            cm_conf = _binary_counts_from_pred_truth(y_pred=pred_conf, y_true=truth_s)
+            mets_conf = _binary_metrics_from_counts(cm_conf)
+            res_conf = {"mode": "sample", "pairs": int(ii_s.size), "thr": float(thr_conf), **cm_conf, **{f"m_{k}": float(v) for k, v in mets_conf.items()}}
 
-    yhat_tr, _ = predict_labels(X_final, modelo["W"], modelo["b"], modelo["classes"])
-    yhat_te, P_te = predict_labels(X_test_final, modelo["W"], modelo["b"], modelo["classes"])
+            # ---- AUCs (pares amostrados) ----
+            score_conf = (conf_s * same_id.astype(np.float32)).astype(np.float32, copy=False)
+            auc_cos = roc_auc_fast(scores=sims_cos, y_true=(truth_s == 1))
+            auc_prob = roc_auc_fast(scores=sims_prob, y_true=(truth_s == 1))
+            auc_conf = roc_auc_fast(scores=score_conf, y_true=(truth_s == 1))
 
-    report_accuracy("TREINO(final sample)", y_final, yhat_tr)
-    report_accuracy("TESTE", y_test_final, yhat_te)
-    mostrar_exemplos_previsao(y_test_final, yhat_te, P_te, n=int(CONFIG["n_exemplos_previsao"]), seed=int(CONFIG["seed_split"]))
-    matriz_confusao_top_k(y_test_final, yhat_te, top_k=int(CONFIG["top_k_confusao"]))
+            print("\n[AUTH] ROC-AUC (pares amostrados):")
+            print(f"  cosine(logits_norm): {auc_cos:.6f} | prob_dot: {auc_prob:.6f} | id+conf: {auc_conf:.6f} | n_pairs={int(truth_s.size)}")
 
+            # ---- Macro ROC-AUC por identidade (one-vs-all em pares) ----
+            macro_cfg = auth_cfg.get("macro_auc", {}) or {}
+            if bool(macro_cfg.get("enable", True)):
+                print("\n[AUTH] Macro ROC-AUC por identidade (one-vs-all, em pares):")
+                mac = auth_macro_auc_per_identity(
+                    y=y_eval, y_pred=y_pred, pmax=pmax, emb=emb, P=P, rng=rng, cfg=macro_cfg
+                )
+                if mac is None or len(mac) == 0 or not bool(mac.get("enabled", True)):
+                    print("  (não foi possível calcular)")
+                else:
+                    n_ids = int(mac.get("n_classes_used", 0))
+                    print(
+                        f"  cos_mean={float(mac.get('cos_mean', float('nan'))):.6f} | "
+                        f"prob_mean={float(mac.get('prob_mean', float('nan'))):.6f} | "
+                        f"conf_mean={float(mac.get('conf_mean', float('nan'))):.6f} | "
+                        f"n_ids={n_ids}"
+                    )
+                    print(
+                        f"  cos_median={float(mac.get('cos_median', float('nan'))):.6f} | "
+                        f"prob_median={float(mac.get('prob_median', float('nan'))):.6f} | "
+                        f"conf_median={float(mac.get('conf_median', float('nan'))):.6f}"
+                    )
+    # imprime resultados (métricas além de acurácia)
+    print("\n[AUTH] Resultados (cosine(logits)-threshold):", {"thr": float(thr_cos), **{k: res_cos.get(k) for k in ("mode","pairs","m_acc","m_f1","m_balanced_acc","TP","TN","FP","FN")}})
+    print_confusion_binary("[AUTH] Confusão cosine(logits) (same vs different)", {"TP": int(res_cos.get("TP", 0)), "TN": int(res_cos.get("TN", 0)), "FP": int(res_cos.get("FP", 0)), "FN": int(res_cos.get("FN", 0))})
 
+    print("[AUTH] Resultados (prob_dot-threshold):", {"thr": float(thr_prob), **{k: res_prob.get(k) for k in ("mode","pairs","m_acc","m_f1","m_balanced_acc","TP","TN","FP","FN")}})
+    print_confusion_binary("[AUTH] Confusão prob_dot (same vs different)", {"TP": int(res_prob.get("TP", 0)), "TN": int(res_prob.get("TN", 0)), "FP": int(res_prob.get("FP", 0)), "FN": int(res_prob.get("FN", 0))})
 
-    # ============================================================
-    # SALVAR (modelo + classes + normalização)
-    # ============================================================
-    out_dir = (Path(__file__).resolve().parent
-               if "__file__" in globals() else Path.cwd())
-    save_path = out_dir / "logreg_pm_model_and_classes.joblib"
+    print("[AUTH] Resultados (id+conf):", {"thr_conf": float(thr_conf), **{k: res_conf.get(k) for k in ("mode","pairs","m_acc","m_f1","m_balanced_acc","TP","TN","FP","FN")}})
+    print_confusion_binary("[AUTH] Confusão id+conf (same vs different)", {"TP": int(res_conf.get("TP", 0)), "TN": int(res_conf.get("TN", 0)), "FP": int(res_conf.get("FP", 0)), "FN": int(res_conf.get("FN", 0))})
 
-    # Salva tudo necessário para usar na identificação e autenticação:
-    #  - 'modelo' contém pesos (W, b) e metadados (classes, stats)
-    #  - 'classes_usadas' = IDs originais das classes no dataset
-    #  - 'standardizer' garante mesma padronização (z-score) em inferência
-    payload = {
-        "model_kind": "logistic_regression_softmax_elasticnet_sgd",
-        "modelo": modelo,
-        "classes_usadas": np.asarray(classes_final, dtype=np.int64),
+    # matrizes por âncora (cosine vs id+conf)
+    n_anchor = int(auth_cfg.get("n_anchor_images", 10))
+    anchor_idx = rng.choice(n, size=min(n_anchor, n), replace=False).astype(np.int64, copy=False) if n > 0 else np.array([], dtype=np.int64)
 
-        "standardizer": {
-            "mean": mean_tr,
-            "std": std_tr,
-            "eps_std": float(CONFIG["eps_std"]),
-        },
+    print("\n[AUTH] Matrizes por âncora (TP/FP/FN/TN vs todas as outras amostras):")
+    for ai in anchor_idx.tolist():
+        mask_other = np.ones(n, dtype=bool)
+        mask_other[int(ai)] = False
+        truth_same = (y_eval == y_eval[int(ai)]) & mask_other
 
-        "best_hparams": {"l1": float(best_l1), "l2": float(best_l2)},
-        "cv_info": {"mean_acc_cv": float(best_acc), "alpha_med": float(alpha_med)},
-        "metrics": {
-            "acc_train_final_sample": float(np.mean(yhat_tr == y_final)) if y_final.size else float("nan"),
-            "acc_test": float(np.mean(yhat_te == y_test_final)) if y_test_final.size else float("nan"),
-        },
-        "config_snapshot": dict(CONFIG),
-    }
+        sims = emb @ emb[int(ai)]
+        pred_same_cos = (sims >= float(thr_cos)) & mask_other
+        cm_a_cos = _binary_counts_from_pred_truth(pred_same_cos, truth_same)
+        mets_a_cos = _binary_metrics_from_counts(cm_a_cos)
 
-    joblib.dump(payload, save_path, compress=3)
-    print()
-    print(f"[SAVE] Modelo (Regressão Logística) + classes salvos em: {save_path}")
+        pred_same_conf = ((y_pred == y_pred[int(ai)]) & (np.minimum(pmax, pmax[int(ai)]) >= float(thr_conf))) & mask_other
+        cm_a_conf = _binary_counts_from_pred_truth(pred_same_conf, truth_same)
+        mets_a_conf = _binary_metrics_from_counts(cm_a_conf)
 
-    salvar_config_logistico_txt(out_dir, payload)  # -> config_logistico.txt
-    salvar_erro_logistico_txt(out_dir, payload)    # -> erro_logistico.txt
+        print(f"  âncora idx={int(ai)} | true_class={int(y_eval[int(ai)])}")
+        print(f"    cosine(logits): thr={float(thr_cos):.4f} | {mets_a_cos} | cm={cm_a_cos}")
+        print(f"    id+conf: thr_conf={float(thr_conf):.4f} | {mets_a_conf} | cm={cm_a_conf}")
+
+    # =========================
+    # AUC macro (one-vs-rest) - todas as classes
+    # =========================
+    # Observação: AUC macro aqui é para IDENTIFICAÇÃO (one-vs-rest por classe).
+    # Isso NÃO é o mesmo que AUC de AUTENTICAÇÃO (mesma identidade?), que é calculado em pares.
+    macro_auc_cfg = SCRIPT_CONFIG.get("macro_auc", {}) or {}
+    if bool(macro_auc_cfg.get("enable", True)):
+        use_fast_auc = bool(macro_auc_cfg.get("use_fast_auc", True))
+        progress_every = int(macro_auc_cfg.get("progress_every", 200))
+
+        classes_for_auc = np.unique(y_eval).astype(np.int64, copy=False)
+        aucs: list[float] = []
+        t0 = time.time()
+
+        for i_c, c in enumerate(classes_for_auc.tolist(), start=1):
+            idx = np.where(classes_modelo == int(c))[0]
+            if idx.size == 0:
+                continue
+            k = int(idx[0])
+            scores = P[:, k]
+            truth = (y_eval == int(c)).astype(np.int8, copy=False)
+
+            if use_fast_auc:
+                auc = roc_auc_fast(scores=scores, y_true=(truth == 1))
+            else:
+                fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
+                if fpr.size == 0:
+                    continue
+
+            aucs.append(float(auc))
+
+            if progress_every > 0 and (i_c % progress_every == 0):
+                dt = time.time() - t0
+                print(f"  [AUC][macro] classes_processadas={i_c}/{int(classes_for_auc.size)} | aucs_ok={len(aucs)} | {dt:.1f}s")
+
+        if len(aucs) == 0:
+            print("\n[AUC] Não foi possível calcular AUC macro (sem classes/curvas).")
+        else:
+            macro_auc = float(np.mean(aucs))
+            med = float(np.median(aucs))
+            print("\n[AUC] Macro AUC (one-vs-rest) - todas as classes:")
+            print(f"  macro_auc={macro_auc:.6f} | mediana={med:.6f} | n_classes={len(aucs)} | min={min(aucs):.6f} | max={max(aucs):.6f}")
+
+    # =========================
+    # INTERATIVO (opcional)
+    # =========================
+    if bool(SCRIPT_CONFIG.get("enable_interactive_queries", False)):
+        print("\n[INTERATIVO] Ativo. 'q' para sair.")
+        while True:
+            s = input("\n(1) Digite um ID de amostra (0..N-1) para predizer classe (ou 'q'): ").strip()
+            if s.lower() in ("q", "quit", "exit"):
+                break
+            try:
+                idx = int(s)
+            except Exception:
+                print("  input inválido.")
+                continue
+            if idx < 0 or idx >= int(y_eval.size):
+                print("  ID fora do range.")
+                continue
+            print(f"  y_true={int(y_eval[idx])} | y_pred={int(y_pred[idx])} | pmax={float(P[idx].max()):.4f}")
+
+            s2 = input("(2) Digite DOIS IDs (i j) para autenticar (ou enter para pular): ").strip()
+            if not s2:
+                continue
+            if s2.lower() in ("q", "quit", "exit"):
+                break
+            parts = s2.split()
+            if len(parts) != 2:
+                print("  esperado: i j")
+                continue
+            try:
+                i = int(parts[0]); j = int(parts[1])
+            except Exception:
+                print("  IDs inválidos.")
+                continue
+            if i < 0 or j < 0 or i >= int(y_eval.size) or j >= int(y_eval.size):
+                print("  IDs fora do range.")
+                continue
+
+            # regra id+conf (principal)
+            same_pred = (y_pred[i] == y_pred[j]) and (min(float(P[i].max()), float(P[j].max())) >= float(thr_conf))
+            if same_pred:
+                print(f"  [AUTH id+conf] SAME (pred_class={int(y_pred[i])}) | conf_min={min(float(P[i].max()), float(P[j].max())):.4f} >= {float(thr_conf):.4f}")
+            else:
+                print(f"  [AUTH id+conf] DIFFERENT | conf_min={min(float(P[i].max()), float(P[j].max())):.4f} | same_id_pred={bool(y_pred[i]==y_pred[j])}")
+
+        print("[INTERATIVO] Encerrado.")
+
 
 if __name__ == "__main__":
     main()
