@@ -6,14 +6,21 @@ Laura Silva Pelicer
 Renan Rios Diniz
 
 Código de avaliação de modelo com tarefas de identificação e autenticação
-Consome parâmetros de modelo treinado
-Regressão Logística (Softmax) Multinomial
+Consome payload salvo pelo treino (joblib)
+Regressão Logística Multinomial (softmax) sobre features HOG
+
+Notas:
+- Identificação (multiclasse): prever o ID/classe de cada imagem.
+  Métricas típicas: acurácia top-1; AUC ROC macro (one-vs-rest) para referência.
+- Autenticação / verificação (binário): decidir se um par de imagens é da mesma identidade.
+  O threshold é ajustado em X_tune/y_tune (anti-leakage) e avaliamos em X_eval/y_eval.
 """
 
 from __future__ import annotations
 
 import sys
 import math
+import time
 import joblib
 import numpy as np
 from pathlib import Path
@@ -50,6 +57,8 @@ SCRIPT_CONFIG = {
     # AUC macro (one-vs-rest) para todas as classes (ativar/desativar)
     "macro_auc": {
         "enable": True,
+        "use_fast_auc": True,
+        "progress_every": 200,
     },
 
     # autenticação
@@ -66,6 +75,19 @@ SCRIPT_CONFIG = {
         "eval_mode": "auto",              # "auto" | "full" | "sample"
         "full_if_n_leq": 2500,            # se N <= isso, tenta full (O(N^2))
         "sample_pairs_if_large": 300000,  # #pares amostrados se N grande
+
+        # fração dos pares a avaliar (1.0 = usa tudo; <1.0 acelera prototipagem)
+        "pairs_fraction": 1.0,
+
+        # Macro ROC-AUC por identidade (one-vs-all) - usa pares por classe/identidade
+        "macro_auc": {
+            "enable": True,
+            "pos_pairs_per_class": 30,
+            "neg_pairs_per_class": 60,
+            "classes_fraction": 1.0,
+            "max_classes": 0,
+            "progress_every": 100,
+        },
 
         # matrizes por âncora
         "n_anchor_images": 10,
@@ -300,15 +322,34 @@ def _sample_negative_pairs(y: np.ndarray, rng: np.random.Generator, total: int):
     return pairs
 
 
-def _binary_counts_from_pred_truth(pred: np.ndarray, truth: np.ndarray) -> Dict[str, int]:
+def _binary_counts_from_pred_truth(
+    pred=None,
+    truth=None,
+    y_pred=None,
+    y_true=None,
+    **kwargs
+):
+    """
+    Compatível com chamadas:
+      - _binary_counts_from_pred_truth(pred, truth)
+      - _binary_counts_from_pred_truth(pred=..., truth=...)
+      - _binary_counts_from_pred_truth(y_pred=..., y_true=...)  (como no seu main)
+    """
+    if pred is None:
+        pred = y_pred
+    if truth is None:
+        truth = y_true
+    if pred is None or truth is None:
+        raise ValueError("Você precisa fornecer (pred, truth) ou (y_pred, y_true).")
+
     pred = np.asarray(pred).astype(bool)
     truth = np.asarray(truth).astype(bool)
+
     TP = int(np.sum(pred & truth))
     TN = int(np.sum((~pred) & (~truth)))
     FP = int(np.sum(pred & (~truth)))
     FN = int(np.sum((~pred) & truth))
     return {"TP": TP, "TN": TN, "FP": FP, "FN": FN}
-
 
 def _binary_metrics_from_counts(cm: Dict[str, int]) -> Dict[str, float]:
     TP = float(cm["TP"]); TN = float(cm["TN"]); FP = float(cm["FP"]); FN = float(cm["FN"])
@@ -552,28 +593,37 @@ def eval_auth_pairs_full_identity_confidence(y_pred: np.ndarray, pmax: np.ndarra
     return {"mode": "full", "pairs": int(pairs), "TP": TP, "TN": TN, "FP": FP, "FN": FN, **{f"m_{k}": v for k, v in mets.items()}}
 
 
-def _sample_pairs_uniform(n: int, rng: np.random.Generator, n_pairs: int):
+def _sample_pairs_uniform(n: int, rng: np.random.Generator, n_pairs: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Amostra n_pairs pares (i<j) aproximadamente uniformes (com reposição).
+
+    Observações:
+      - Para n grande, amostragem SEM reposição/sem duplicatas é cara e desnecessária aqui.
+      - Duplicatas têm efeito desprezível nas métricas/ROC quando n_pairs é grande.
+
+    Retorna:
+      ii, jj: arrays int64 com shape (n_pairs,), com ii[k] < jj[k] e ii[k] != jj[k].
+    """
     n = int(n)
     n_pairs = int(n_pairs)
-    ii = np.zeros((n_pairs,), dtype=np.int64)
-    jj = np.zeros((n_pairs,), dtype=np.int64)
-    got = 0
-    tries = 0
-    while got < n_pairs and tries < 20 * n_pairs:
-        i = int(rng.integers(0, n))
-        j = int(rng.integers(0, n))
-        if i == j:
-            tries += 1
-            continue
-        if i > j:
-            i, j = j, i
-        ii[got] = i
-        jj[got] = j
-        got += 1
-        tries += 1
-    if got < n_pairs:
-        ii = ii[:got]
-        jj = jj[:got]
+    if n < 2 or n_pairs <= 0:
+        return (np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64))
+
+    ii = rng.integers(0, n, size=n_pairs, dtype=np.int64)
+    jj = rng.integers(0, n, size=n_pairs, dtype=np.int64)
+
+    # garante i != j (re-amostra apenas onde necessário)
+    mask = (ii == jj)
+    while np.any(mask):
+        jj[mask] = rng.integers(0, n, size=int(np.sum(mask)), dtype=np.int64)
+        mask = (ii == jj)
+
+    # normaliza para i < j
+    swap = ii > jj
+    if np.any(swap):
+        tmp = ii[swap].copy()
+        ii[swap] = jj[swap]
+        jj[swap] = tmp
+
     return ii, jj
 
 
@@ -597,6 +647,355 @@ def eval_auth_pairs_sample(emb: np.ndarray, y: np.ndarray, thr: float, rng: np.r
 # ============================================================
 # ROC + AUC (sem sklearn)
 # ============================================================
+
+def roc_auc_fast(scores, y_true=None, truth=None, y=None, **kwargs):
+    """
+    ROC-AUC em O(n log n) com tratamento de empates (ties).
+
+    Compatível com chamadas:
+      - roc_auc_fast(scores, truth)
+      - roc_auc_fast(scores=s, y_true=...)
+      - roc_auc_fast(scores=s, truth=...)
+      - roc_auc_fast(scores=s, y=...)
+
+    Referência: estatística U de Mann–Whitney / soma de ranks (AUC = P(score_pos > score_neg) + 0.5*P(tie)).
+    """
+    if y_true is None:
+        y_true = truth if truth is not None else y
+
+    if y_true is None:
+        raise TypeError("roc_auc_fast: forneça y_true (ou truth/y).")
+
+    scores = np.asarray(scores, dtype=np.float64).ravel()
+    y_true = np.asarray(y_true).ravel()
+
+    if y_true.dtype != np.bool_:
+        y_true = (y_true.astype(np.int64) == 1)
+
+    if scores.size != y_true.size:
+        raise ValueError(f"roc_auc_fast: tamanhos diferentes: scores={scores.size}, y_true={y_true.size}")
+
+    n = int(scores.size)
+    n_pos = int(np.sum(y_true))
+    n_neg = n - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return 0.0  # AUC indefinido; aqui devolvemos 0.0 para não quebrar pipeline
+
+    order = np.argsort(scores, kind="mergesort")  # mergesort é estável (bom para ties)
+    s_sorted = scores[order]
+    y_sorted = y_true[order]
+
+    # Soma de ranks dos positivos com empates: atribui rank médio ao grupo empatado
+    rank_sum_pos = 0.0
+    rank = 1  # ranks 1..n
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and s_sorted[j] == s_sorted[i]:
+            j += 1
+
+        group_size = j - i
+        avg_rank = (rank + (rank + group_size - 1)) / 2.0
+        pos_in_group = float(np.sum(y_sorted[i:j]))
+        rank_sum_pos += pos_in_group * avg_rank
+
+        rank += group_size
+        i = j
+
+    auc = (rank_sum_pos - (n_pos * (n_pos + 1) / 2.0)) / (n_pos * n_neg)
+    return float(auc)
+
+
+
+
+
+def auth_macro_auc_per_identity(
+    y=None,
+    y_true=None,
+    truth=None,
+    y_pred=None,
+    pred=None,
+    pmax=None,
+    conf=None,
+    emb=None,
+    E=None,
+    P=None,
+    probs=None,
+    rng=None,
+    random_state=None,
+    cfg=None,
+    macro_cfg=None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Macro ROC-AUC de AUTENTICAÇÃO por identidade (one-vs-all, em pares).
+
+    Para cada identidade/classe c:
+      - Positivos: pares (i,j) com y_true[i]==c e y_true[j]==c
+      - Negativos: pares (i,j) com y_true[i]==c e y_true[j]!=c
+      - Calcula AUC(c) para 3 scores de verificação:
+          1) cosine  : dot de embeddings L2-normalizados (cosine similarity)
+          2) prob_dot: dot entre vetores de probabilidades por classe
+          3) id+conf : (mesmo ID predito) * min(pmax_i, pmax_j)
+
+    Retorna a MÉDIA (macro) e MEDIANA dos AUCs por identidade para cada score.
+
+    Observação:
+      - Isto NÃO é o AUC global (micro-AUC) em pares do dataset inteiro.
+      - Macro-AUC dá peso igual para cada identidade, mesmo que algumas tenham mais imagens.
+    """
+    # ----------------------------
+    # Resolver cfg + enable
+    # ----------------------------
+    if cfg is None:
+        cfg = macro_cfg or {}
+    cfg = dict(cfg) if isinstance(cfg, dict) else {}
+
+    enable = bool(cfg.get("enable", True))
+    if not enable:
+        return {"enabled": False}
+
+    # ----------------------------
+    # Compatibilidade de nomes (MLP vs LogReg / chamadas antigas)
+    # ----------------------------
+    if y_true is None:
+        y_true = y if y is not None else truth
+    if y_pred is None:
+        y_pred = pred
+    if pmax is None:
+        pmax = conf
+    if emb is None:
+        emb = E
+    if P is None:
+        P = probs
+
+    if y_true is None or y_pred is None or pmax is None or emb is None or P is None:
+        raise ValueError(
+            "auth_macro_auc_per_identity: forneça y_true/y, y_pred, pmax (conf), emb (E) e P (probs)."
+        )
+
+    # ----------------------------
+    # RNG
+    # ----------------------------
+    if rng is None:
+        rng = random_state
+    if isinstance(rng, np.random.Generator):
+        rg = rng
+    elif rng is None:
+        rg = np.random.default_rng(123)
+    else:
+        rg = np.random.default_rng(int(rng))
+
+    # ----------------------------
+    # Normalização de entradas
+    # ----------------------------
+    y_true = np.asarray(y_true, dtype=np.int64).ravel()
+    y_pred = np.asarray(y_pred, dtype=np.int64).ravel()
+    pmax = np.asarray(pmax, dtype=np.float32).ravel()
+    emb = np.asarray(emb, dtype=np.float32)
+    P = np.asarray(P, dtype=np.float32)
+
+    n = int(y_true.size)
+    if n < 2:
+        return {"enabled": True, "n_classes_used": 0}
+
+    if y_pred.size != n or pmax.size != n:
+        raise ValueError(f"auth_macro_auc_per_identity: tamanhos incompatíveis: "
+                         f"y_true={n}, y_pred={y_pred.size}, pmax={pmax.size}")
+    if emb.shape[0] != n or P.shape[0] != n:
+        raise ValueError(f"auth_macro_auc_per_identity: tamanhos incompatíveis: "
+                         f"emb={emb.shape}, P={P.shape}, esperado N={n} na dim 0")
+
+    # ----------------------------
+    # Config
+    # ----------------------------
+    pos_pairs_per_class = int(cfg.get("pos_pairs_per_class", 30))
+    neg_pairs_per_class = int(cfg.get("neg_pairs_per_class", 60))
+    classes_fraction = float(cfg.get("classes_fraction", 1.0))
+    max_classes = int(cfg.get("max_classes", 0))
+    progress_every = int(cfg.get("progress_every", 200))
+    return_per_class = bool(cfg.get("return_per_class", False))
+
+    classes = np.unique(y_true)
+    if classes.size == 0:
+        return {"enabled": True, "n_classes_used": 0}
+
+    # amostra subconjunto de classes, se configurado
+    if 0.0 < classes_fraction < 1.0:
+        k = max(1, int(round(classes.size * classes_fraction)))
+        k = min(k, int(classes.size))
+        classes = rg.choice(classes, size=k, replace=False)
+
+    if max_classes > 0 and classes.size > max_classes:
+        classes = rg.choice(classes, size=int(max_classes), replace=False)
+
+    per_class_rows = []  # (class_id, auc_cos, auc_prob, auc_conf)
+    t0 = time.time()
+    total = int(classes.size)
+
+    for t, c in enumerate(classes.tolist(), start=1):
+        idx_c = np.flatnonzero(y_true == int(c)).astype(np.int64, copy=False)
+        if idx_c.size < 2:
+            continue
+        idx_o = np.flatnonzero(y_true != int(c)).astype(np.int64, copy=False)
+        if idx_o.size < 1:
+            continue
+
+        k_pos = int(max(0, pos_pairs_per_class))
+        k_neg = int(max(0, neg_pairs_per_class))
+        if k_pos <= 0 or k_neg <= 0:
+            continue
+
+        # --- amostra positivos (c vs c), com reposição; evita i==j
+        ii_pos = idx_c[rg.integers(0, idx_c.size, size=k_pos, dtype=np.int64)]
+        jj_pos = idx_c[rg.integers(0, idx_c.size, size=k_pos, dtype=np.int64)]
+        mask = (ii_pos == jj_pos)
+        while np.any(mask):
+            jj_pos[mask] = idx_c[rg.integers(0, idx_c.size, size=int(np.sum(mask)), dtype=np.int64)]
+            mask = (ii_pos == jj_pos)
+
+        # --- amostra negativos (c vs ~c)
+        ii_neg = idx_c[rg.integers(0, idx_c.size, size=k_neg, dtype=np.int64)]
+        jj_neg = idx_o[rg.integers(0, idx_o.size, size=k_neg, dtype=np.int64)]
+
+        ii = np.concatenate([ii_pos, ii_neg], axis=0)
+        jj = np.concatenate([jj_pos, jj_neg], axis=0)
+        truth_pairs = np.concatenate([
+            np.ones((k_pos,), dtype=np.int8),
+            np.zeros((k_neg,), dtype=np.int8),
+        ], axis=0).astype(bool, copy=False)
+
+        # scores contínuos
+        s_cos = np.sum(emb[ii] * emb[jj], axis=1)
+        s_prob = np.sum(P[ii] * P[jj], axis=1)
+        same_id = (y_pred[ii] == y_pred[jj]).astype(np.float32, copy=False)
+        conf_pair = np.minimum(pmax[ii], pmax[jj]).astype(np.float32, copy=False)
+        s_conf = (conf_pair * same_id).astype(np.float32, copy=False)
+
+        auc_cos = float(roc_auc_fast(scores=s_cos, y_true=truth_pairs))
+        auc_prob = float(roc_auc_fast(scores=s_prob, y_true=truth_pairs))
+        auc_conf = float(roc_auc_fast(scores=s_conf, y_true=truth_pairs))
+        per_class_rows.append((int(c), auc_cos, auc_prob, auc_conf))
+
+        if progress_every > 0 and (t % progress_every == 0):
+            dt = max(1e-6, time.time() - t0)
+            rate = t / dt
+            remaining = (total - t) / max(1e-9, rate)
+            print(
+                f"  [AUTH][macro-AUC] classes processadas: {t}/{total} | usadas={len(per_class_rows)} | "
+                f"vel={rate:.1f} cls/s | ETA~{remaining:.1f}s"
+            )
+
+    if len(per_class_rows) == 0:
+        return {"enabled": True, "n_classes_used": 0}
+
+    arr = np.asarray(per_class_rows, dtype=np.float64)
+    # colunas: 0=class_id, 1=cos, 2=prob, 3=conf
+    cos_vals = arr[:, 1]
+    prob_vals = arr[:, 2]
+    conf_vals = arr[:, 3]
+
+    out: Dict[str, Any] = {
+        "enabled": True,
+        "n_classes_used": int(arr.shape[0]),
+        "cos_mean": float(np.mean(cos_vals)),
+        "prob_mean": float(np.mean(prob_vals)),
+        "conf_mean": float(np.mean(conf_vals)),
+        "cos_median": float(np.median(cos_vals)),
+        "prob_median": float(np.median(prob_vals)),
+        "conf_median": float(np.median(conf_vals)),
+    }
+
+    if return_per_class:
+        out["per_class"] = {
+            int(cid): {"cos": float(cos), "prob": float(prob), "conf": float(conf)}
+            for (cid, cos, prob, conf) in per_class_rows
+        }
+
+    return out
+
+
+
+def _pair_dot_scores_batched(
+    A,
+    ii,
+    jj,
+    batch=None,
+    batch_size=None,
+    dtype=np.float32,
+    progress_every=100000,
+    label="pairs",
+):
+    """Calcula dot(A[ii], A[jj]) em batches com tracker de progresso.
+
+    Compatível com duas convenções de chamada:
+      - batch=...
+      - batch_size=... (como no script do MLP)
+
+    Parâmetros:
+      A: matriz (N, D) ou (N, K) (embeddings normalizados, probabilidades etc.)
+      ii, jj: índices (mesmo tamanho) para formar pares
+      batch/batch_size: tamanho do batch; se ambos vierem, batch_size tem prioridade
+      dtype: dtype do cálculo/saída
+      progress_every: imprime status a cada N pares (0 desativa)
+      label: texto no tracker
+
+    Observação:
+      Fancy-indexing materializa (batch, D). Ajustamos dinamicamente o batch para evitar
+      explosão de memória quando D é grande (ex.: milhares de classes).
+    """
+    if batch_size is None:
+        batch_size = batch
+    if batch_size is None:
+        batch_size = 50000
+
+    A = np.asarray(A, dtype=dtype)
+    ii = np.asarray(ii, dtype=np.int64).ravel()
+    jj = np.asarray(jj, dtype=np.int64).ravel()
+    n_pairs = int(ii.size)
+    out = np.empty((n_pairs,), dtype=dtype)
+
+    if n_pairs == 0:
+        return out
+
+    # Ajuste dinâmico de batch (limite ~120MB para Ai/Aj)
+    try:
+        bytes_per = np.dtype(dtype).itemsize
+    except Exception:
+        bytes_per = 4
+    max_bytes = 120 * 1024 * 1024
+    if A.ndim == 2 and A.shape[1] > 0:
+        d = int(A.shape[1])
+        max_elems = max(1, max_bytes // max(1, bytes_per))
+        batch_size = min(int(batch_size), max(1, max_elems // d))
+    else:
+        batch_size = int(max(1, batch_size))
+
+    progress_every = int(progress_every) if progress_every else 0
+    done = 0
+    t0 = time.time()
+
+    for start in range(0, n_pairs, batch_size):
+        end = min(n_pairs, start + batch_size)
+        Ai = A[ii[start:end]]
+        Aj = A[jj[start:end]]
+        out[start:end] = np.einsum("ij,ij->i", Ai, Aj, optimize=True).astype(dtype, copy=False)
+
+        done = end
+        if progress_every and (done == n_pairs or (done % progress_every) == 0):
+            pct = 100.0 * done / float(n_pairs)
+            dt = max(1e-9, time.time() - t0)
+            rate = done / dt
+            eta = (n_pairs - done) / max(1e-9, rate)
+            print(
+                f"    [AUC-pairs] {label}: {done}/{n_pairs} ({pct:.1f}%) | "
+                f"{rate:,.0f} pares/s | ETA~{eta:,.1f}s"
+            )
+
+    return out
+
+
+
+
 
 def roc_curve_simple(scores: np.ndarray, truth: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
@@ -628,7 +1027,7 @@ def roc_curve_simple(scores: np.ndarray, truth: np.ndarray) -> Tuple[np.ndarray,
     order = np.argsort(fpr)
     fpr = fpr[order]
     tpr = tpr[order]
-    auc = float(np.trapz(tpr, fpr)) if fpr.size > 1 else 0.0
+    auc = float(np.trapezoid(tpr, fpr)) if fpr.size > 1 else 0.0
     return fpr, tpr, thrs.astype(np.float32), auc
 
 
@@ -878,6 +1277,20 @@ def main():
     print("  y_tune:", y_tune.shape, y_tune.dtype, "| classes_present:", int(np.unique(y_tune).size))
 
 
+    # -------------------------
+    # Anti-leakage check: nenhum exemplo do tuning pode estar no eval/teste
+    # (se o dataset tiver ids/paths).
+    # -------------------------
+    try:
+        if (_id_eval is not None) and (_id_tune is not None):
+            inter = np.intersect1d(np.asarray(_id_eval).ravel(), np.asarray(_id_tune).ravel())
+            if inter.size > 0:
+                raise RuntimeError(f"[LEAKAGE] Detected overlap between TUNING and EVAL sets: {int(inter.size)} samples.")
+    except Exception as e:
+        # se ids não estiverem disponíveis ou houver problemas de tipo, apenas avisa.
+        print(f"[LEAKAGE] overlap check skipped/failed: {e}")
+
+
     # =========================
     # IDENTIFICAÇÃO
     # =========================
@@ -938,8 +1351,18 @@ def main():
         thr_prob = 0.5
         thr_conf = 0.5
     else:
-        sims_cos = np.sum(emb_tune[ii_t] * emb_tune[jj_t], axis=1).astype(np.float32, copy=False)
-        sims_prob = np.sum(P_tune[ii_t] * P_tune[jj_t], axis=1).astype(np.float32, copy=False)
+        sims_cos = _pair_dot_scores_batched(
+            A=emb_tune, ii=ii_t, jj=jj_t,
+            label="cosine(logits_norm) [tuning]",
+            batch_size=100000,
+            progress_every=100000,
+        ).astype(np.float32, copy=False)
+        sims_prob = _pair_dot_scores_batched(
+            A=P_tune, ii=ii_t, jj=jj_t,
+            label="prob_dot [tuning]",
+            batch_size=100000,
+            progress_every=100000,
+        ).astype(np.float32, copy=False)
 
         pos_mask = (tt_t == 1)
         neg_mask = (tt_t == 0)
@@ -974,31 +1397,165 @@ def main():
     n = int(y_eval.size)
     use_full = (eval_mode == "full") or (eval_mode == "auto" and n <= full_if_n_leq)
     print(f"\n[AUTH] Avaliação em pares: mode={'full' if use_full else 'sample'} | N={n}")
+    # =========================
+    # AUTENTICAÇÃO / VERIFICAÇÃO (pares)
+    # =========================
+    # Pipeline (análogo ao script de MLP):
+    # 1) Extraímos "embeddings" (aqui: logits normalizados) e probabilidades por classe.
+    # 2) Ajustamos thresholds no conjunto de tuning (X_tune/y_tune), evitando leakage.
+    # 3) Avaliamos em pares. Para N grande, amostramos pares para evitar O(N^2).
+    # 4) Calculamos AUC ROC em pares com algoritmo O(n log n) (roc_auc_fast), pois
+    #    enumerar todos os thresholds únicos não escala quando n_pairs é grande.
+    #
+    # Referências (fundamentos / contexto):
+    # - C. Bishop; Hastie/Tibshirani/Friedman (classificação e probabilidades).
+    # - T. Fawcett, 2006 (ROC/AUC).
+    # - Schroff et al., "FaceNet" (embeddings + cosine para verificação), 2015.
+    # - Deng et al., "ArcFace" / Wang et al., "CosFace" (margens em espaço angular), 2018.
+    #
+    # Importante: AUC de AUTENTICAÇÃO aqui é em PARES (mesma identidade?),
+    # não confundir com AUC macro one-vs-rest de IDENTIFICAÇÃO.
+    pairs_fraction = float(auth_cfg.get("pairs_fraction", 1.0))
+    if not (0.0 < pairs_fraction <= 1.0):
+        pairs_fraction = 1.0
+
+    # número base de pares quando N é grande
+    base_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
+    n_pairs_eval = int(max(1, round(base_pairs * pairs_fraction))) if base_pairs > 0 else 0
 
     if use_full:
-        res_cos = eval_auth_pairs_full(emb, y_eval, thr=float(thr_cos))
-        res_prob = eval_auth_pairs_full_prob(P, y_eval, thr=float(thr_prob))
-        res_conf = eval_auth_pairs_full_identity_confidence(y_pred=y_pred, pmax=pmax, y_true=y_eval, thr_conf=float(thr_conf))
+        res_cos = eval_auth_pairs_full(emb, y_eval, thr_cos)
+        res_prob = eval_auth_pairs_full_prob(P, y_eval, thr_prob)
+        res_conf = eval_auth_pairs_full_identity_confidence(y_pred, pmax, y_eval, thr_conf)
+
+        # ---- AUC em pares amostrados (mesma identidade?) ----
+        if n_pairs_eval > 0 and n > 1:
+            ii_a, jj_a = _sample_pairs_uniform(n=n, rng=rng, n_pairs=n_pairs_eval)
+            truth_a = (y_eval[ii_a] == y_eval[jj_a]).astype(np.int8, copy=False)
+
+            sims_cos_a = _pair_dot_scores_batched(
+                A=emb, ii=ii_a, jj=jj_a,
+                label="cosine(logits_norm) [AUC]",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+
+            sims_prob_a = _pair_dot_scores_batched(
+                A=P, ii=ii_a, jj=jj_a,
+                label="prob_dot [AUC]",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+
+            same_id_a = (y_pred[ii_a] == y_pred[jj_a])
+            conf_a = np.minimum(pmax[ii_a], pmax[jj_a]).astype(np.float32, copy=False)
+            score_conf_a = (conf_a * same_id_a.astype(np.float32)).astype(np.float32, copy=False)
+
+            auc_cos = roc_auc_fast(scores=sims_cos_a, y_true=(truth_a == 1))
+            auc_prob = roc_auc_fast(scores=sims_prob_a, y_true=(truth_a == 1))
+            auc_conf = roc_auc_fast(scores=score_conf_a, y_true=(truth_a == 1))
+
+            print("\n[AUTH] ROC-AUC (pares amostrados):")
+            print(f"  cosine(logits_norm): {auc_cos:.6f} | prob_dot: {auc_prob:.6f} | id+conf: {auc_conf:.6f} | n_pairs={int(truth_a.size)}")
+
+        # ---- Macro ROC-AUC por identidade (one-vs-all em pares) ----
+        macro_cfg = auth_cfg.get("macro_auc", {}) or {}
+        if bool(macro_cfg.get("enable", True)):
+            print("\n[AUTH] Macro ROC-AUC por identidade (one-vs-all, em pares):")
+            mac = auth_macro_auc_per_identity(
+                y=y_eval, y_pred=y_pred, pmax=pmax, emb=emb, P=P, rng=rng, cfg=macro_cfg
+            )
+            if mac is None or len(mac) == 0 or not bool(mac.get("enabled", True)):
+                print("  (não foi possível calcular)")
+            else:
+                n_ids = int(mac.get("n_classes_used", 0))
+                print(
+                    f"  cos_mean={float(mac.get('cos_mean', float('nan'))):.6f} | "
+                    f"prob_mean={float(mac.get('prob_mean', float('nan'))):.6f} | "
+                    f"conf_mean={float(mac.get('conf_mean', float('nan'))):.6f} | "
+                    f"n_ids={n_ids}"
+                )
+                print(
+                    f"  cos_median={float(mac.get('cos_median', float('nan'))):.6f} | "
+                    f"prob_median={float(mac.get('prob_median', float('nan'))):.6f} | "
+                    f"conf_median={float(mac.get('conf_median', float('nan'))):.6f}"
+                )
     else:
-        res_cos = eval_auth_pairs_sample(emb, y_eval, thr=float(thr_cos), rng=rng, n_pairs=int(auth_cfg.get("sample_pairs_if_large", 300000)))
+        # Amostramos UMA vez e reaproveitamos os mesmos pares para:
+        # - métricas por threshold (cosine / prob_dot / id+conf)
+        # - AUC (threshold-var) para cada score
+        if n_pairs_eval <= 0 or n <= 1:
+            # fallback (deveria ser raro)
+            res_cos = eval_auth_pairs_sample(emb, y_eval, thr_cos, rng=rng, n_pairs=max(1, base_pairs))
+            res_prob = {"mode": "sample", "pairs": int(res_cos.get("pairs", 0)), "thr": float(thr_prob), "TP": 0, "TN": 0, "FP": 0, "FN": 0, "m_acc": float("nan"), "m_f1": float("nan"), "m_balanced_acc": float("nan")}
+            res_conf = {"mode": "sample", "pairs": int(res_cos.get("pairs", 0)), "thr": float(thr_conf), "TP": 0, "TN": 0, "FP": 0, "FN": 0, "m_acc": float("nan"), "m_f1": float("nan"), "m_balanced_acc": float("nan")}
+        else:
+            ii_s, jj_s = _sample_pairs_uniform(n=n, rng=rng, n_pairs=n_pairs_eval)
+            truth_s = (y_eval[ii_s] == y_eval[jj_s]).astype(np.int8, copy=False)
 
-        n_pairs = int(auth_cfg.get("sample_pairs_if_large", 300000))
-        ii_s, jj_s = _sample_pairs_uniform(n=int(n), rng=rng, n_pairs=int(n_pairs))
-        truth_s = (y_eval[ii_s] == y_eval[jj_s]).astype(np.int8)
+            # ---- cosine(logits_norm) ----
+            sims_cos = _pair_dot_scores_batched(
+                A=emb, ii=ii_s, jj=jj_s,
+                label="cosine(logits_norm)",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+            pred_cos = sims_cos >= float(thr_cos)
+            cm_cos = _binary_counts_from_pred_truth(y_pred=pred_cos, y_true=truth_s)
+            mets_cos = _binary_metrics_from_counts(cm_cos)
+            res_cos = {"mode": "sample", "pairs": int(ii_s.size), "thr": float(thr_cos), **cm_cos, **{f"m_{k}": float(v) for k, v in mets_cos.items()}}
 
-        sims_prob = np.sum(P[ii_s] * P[jj_s], axis=1).astype(np.float32, copy=False)
-        pred_prob = sims_prob >= float(thr_prob)
-        cm_prob = _binary_counts_from_pred_truth(pred_prob, truth_s == 1)
-        mets_prob = _binary_metrics_from_counts(cm_prob)
-        res_prob = {"mode": "sample", "pairs": int(ii_s.size), "TP": cm_prob["TP"], "TN": cm_prob["TN"], "FP": cm_prob["FP"], "FN": cm_prob["FN"], **{f"m_{k}": v for k, v in mets_prob.items()}}
+            # ---- prob_dot ----
+            sims_prob = _pair_dot_scores_batched(
+                A=P, ii=ii_s, jj=jj_s,
+                label="prob_dot",
+                batch_size=100000,
+                progress_every=100000,
+            ).astype(np.float32, copy=False)
+            pred_prob = sims_prob >= float(thr_prob)
+            cm_prob = _binary_counts_from_pred_truth(y_pred=pred_prob, y_true=truth_s)
+            mets_prob = _binary_metrics_from_counts(cm_prob)
+            res_prob = {"mode": "sample", "pairs": int(ii_s.size), "thr": float(thr_prob), **cm_prob, **{f"m_{k}": float(v) for k, v in mets_prob.items()}}
 
-        same_id = (y_pred[ii_s] == y_pred[jj_s])
-        conf_s = np.minimum(pmax[ii_s], pmax[jj_s])
-        pred_conf = same_id & (conf_s >= float(thr_conf))
-        cm_conf = _binary_counts_from_pred_truth(pred_conf, truth_s == 1)
-        mets_conf = _binary_metrics_from_counts(cm_conf)
-        res_conf = {"mode": "sample", "pairs": int(ii_s.size), "TP": cm_conf["TP"], "TN": cm_conf["TN"], "FP": cm_conf["FP"], "FN": cm_conf["FN"], **{f"m_{k}": v for k, v in mets_conf.items()}}
+            # ---- id+conf ----
+            same_id = (y_pred[ii_s] == y_pred[jj_s])
+            conf_s = np.minimum(pmax[ii_s], pmax[jj_s]).astype(np.float32, copy=False)
+            pred_conf = same_id & (conf_s >= float(thr_conf))
+            cm_conf = _binary_counts_from_pred_truth(y_pred=pred_conf, y_true=truth_s)
+            mets_conf = _binary_metrics_from_counts(cm_conf)
+            res_conf = {"mode": "sample", "pairs": int(ii_s.size), "thr": float(thr_conf), **cm_conf, **{f"m_{k}": float(v) for k, v in mets_conf.items()}}
 
+            # ---- AUCs (pares amostrados) ----
+            score_conf = (conf_s * same_id.astype(np.float32)).astype(np.float32, copy=False)
+            auc_cos = roc_auc_fast(scores=sims_cos, y_true=(truth_s == 1))
+            auc_prob = roc_auc_fast(scores=sims_prob, y_true=(truth_s == 1))
+            auc_conf = roc_auc_fast(scores=score_conf, y_true=(truth_s == 1))
+
+            print("\n[AUTH] ROC-AUC (pares amostrados):")
+            print(f"  cosine(logits_norm): {auc_cos:.6f} | prob_dot: {auc_prob:.6f} | id+conf: {auc_conf:.6f} | n_pairs={int(truth_s.size)}")
+
+            # ---- Macro ROC-AUC por identidade (one-vs-all em pares) ----
+            macro_cfg = auth_cfg.get("macro_auc", {}) or {}
+            if bool(macro_cfg.get("enable", True)):
+                print("\n[AUTH] Macro ROC-AUC por identidade (one-vs-all, em pares):")
+                mac = auth_macro_auc_per_identity(
+                    y=y_eval, y_pred=y_pred, pmax=pmax, emb=emb, P=P, rng=rng, cfg=macro_cfg
+                )
+                if mac is None or len(mac) == 0 or not bool(mac.get("enabled", True)):
+                    print("  (não foi possível calcular)")
+                else:
+                    n_ids = int(mac.get("n_classes_used", 0))
+                    print(
+                        f"  cos_mean={float(mac.get('cos_mean', float('nan'))):.6f} | "
+                        f"prob_mean={float(mac.get('prob_mean', float('nan'))):.6f} | "
+                        f"conf_mean={float(mac.get('conf_mean', float('nan'))):.6f} | "
+                        f"n_ids={n_ids}"
+                    )
+                    print(
+                        f"  cos_median={float(mac.get('cos_median', float('nan'))):.6f} | "
+                        f"prob_median={float(mac.get('prob_median', float('nan'))):.6f} | "
+                        f"conf_median={float(mac.get('conf_median', float('nan'))):.6f}"
+                    )
     # imprime resultados (métricas além de acurácia)
     print("\n[AUTH] Resultados (cosine(logits)-threshold):", {"thr": float(thr_cos), **{k: res_cos.get(k) for k in ("mode","pairs","m_acc","m_f1","m_balanced_acc","TP","TN","FP","FN")}})
     print_confusion_binary("[AUTH] Confusão cosine(logits) (same vs different)", {"TP": int(res_cos.get("TP", 0)), "TN": int(res_cos.get("TN", 0)), "FP": int(res_cos.get("FP", 0)), "FN": int(res_cos.get("FN", 0))})
@@ -1035,28 +1592,45 @@ def main():
     # =========================
     # AUC macro (one-vs-rest) - todas as classes
     # =========================
+    # Observação: AUC macro aqui é para IDENTIFICAÇÃO (one-vs-rest por classe).
+    # Isso NÃO é o mesmo que AUC de AUTENTICAÇÃO (mesma identidade?), que é calculado em pares.
     macro_auc_cfg = SCRIPT_CONFIG.get("macro_auc", {}) or {}
     if bool(macro_auc_cfg.get("enable", True)):
+        use_fast_auc = bool(macro_auc_cfg.get("use_fast_auc", True))
+        progress_every = int(macro_auc_cfg.get("progress_every", 200))
+
         classes_for_auc = np.unique(y_eval).astype(np.int64, copy=False)
-        aucs = []
-        for c in classes_for_auc.tolist():
+        aucs: list[float] = []
+        t0 = time.time()
+
+        for i_c, c in enumerate(classes_for_auc.tolist(), start=1):
             idx = np.where(classes_modelo == int(c))[0]
             if idx.size == 0:
                 continue
             k = int(idx[0])
             scores = P[:, k]
-            truth = (y_eval == int(c)).astype(np.int8)
-            fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
-            if fpr.size == 0:
-                continue
+            truth = (y_eval == int(c)).astype(np.int8, copy=False)
+
+            if use_fast_auc:
+                auc = roc_auc_fast(scores=scores, y_true=(truth == 1))
+            else:
+                fpr, tpr, _thrs, auc = roc_curve_simple(scores, truth)
+                if fpr.size == 0:
+                    continue
+
             aucs.append(float(auc))
+
+            if progress_every > 0 and (i_c % progress_every == 0):
+                dt = time.time() - t0
+                print(f"  [AUC][macro] classes_processadas={i_c}/{int(classes_for_auc.size)} | aucs_ok={len(aucs)} | {dt:.1f}s")
 
         if len(aucs) == 0:
             print("\n[AUC] Não foi possível calcular AUC macro (sem classes/curvas).")
         else:
             macro_auc = float(np.mean(aucs))
+            med = float(np.median(aucs))
             print("\n[AUC] Macro AUC (one-vs-rest) - todas as classes:")
-            print(f"  macro_auc={macro_auc:.6f} | n_classes={len(aucs)} | min={min(aucs):.6f} | max={max(aucs):.6f}")
+            print(f"  macro_auc={macro_auc:.6f} | mediana={med:.6f} | n_classes={len(aucs)} | min={min(aucs):.6f} | max={max(aucs):.6f}")
 
     # =========================
     # INTERATIVO (opcional)
