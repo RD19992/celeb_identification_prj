@@ -1,0 +1,215 @@
+[RUN] 2025-12-22T20:07:33
+[SCRIPT] celeb_MLP_ident_auth_eval.py
+================================================================================
+
+
+[LOAD] Payload do modelo carregado com sucesso!
+  arquivo: C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\mlp_pm_model_and_classes.joblib
+  n_classes_modelo: 2036
+
+[INFO] 20 IDs de classes (exemplo):
+  [14, 17, 22, 23, 25, 31, 32, 38, 56, 59, 65, 66, 69, 78, 82, 85, 94, 114, 122, 142]
+
+[INFO] Exemplos de parâmetros do modelo:
+  W1: (8100, 128) | b1: (128,)
+  W2: (128, 2036) | b2: (2036,)
+  act_hidden: relu
+  act_output: cosine_softmax
+  use_layernorm: True | layernorm_eps: 1e-05
+  cosine_softmax_scale: 20.0 | cosine_softmax_use_bias: False
+  metrics(payload): {'acc_train': 0.9982501590764475, 'acc_test': 0.26456151832460734}
+  best_hparams(payload): {'l2': 0.3, 'dropout': 0.15}
+
+[DATA] Dataset path: C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib
+[DATA] Exists? True
+
+[DATA] Dataset carregado:
+  X: (61118, 8100) float32
+  y: (61118,) int64
+  n_classes_total: 2036
+  paths: (não encontrado no joblib)
+  ids: (não encontrado no joblib)
+
+[EVAL] Conjunto de avaliação (TESTE alinhado):
+  X_eval: (12224, 8100) float32
+  y_eval: (12224,) int64
+  classes_present: 2036
+
+[ID] IMPORTANTE: neste script, o 'ID' de amostra para consultas = índice em X_eval (0..N-1).
+     N=12224 (IDs válidos: 0..12223)
+
+[SPLIT] Reconstruindo conjunto de TUNING (treino alinhado ao modelo) para autenticação (anti-leakage)...
+  X_tune: (48894, 8100) float32
+  y_tune: (48894,) int64 | classes_present: 2036
+
+[IDENTIFICAÇÃO] Acurácia no conjunto de avaliação:
+  acc=0.2646 (3234/12224)
+
+[IDENTIFICAÇÃO] One-vs-all (10 classes aleatórias): classes=[289, 9028, 2471, 3768, 6583, 5888, 2955, 2063, 2122, 1037]
+
+[One-vs-all] classe=289
+            Pred=0    Pred=1
+True=0       12205        13
+True=1           6         0
+acc=0.9984 | TP=0 FP=13 FN=6 TN=12205
+
+[One-vs-all] classe=9028
+            Pred=0    Pred=1
+True=0       12214         4
+True=1           3         3
+acc=0.9994 | TP=3 FP=4 FN=3 TN=12214
+
+[One-vs-all] classe=2471
+            Pred=0    Pred=1
+True=0       12212         6
+True=1           1         5
+acc=0.9994 | TP=5 FP=6 FN=1 TN=12212
+
+[One-vs-all] classe=3768
+            Pred=0    Pred=1
+True=0       12214         4
+True=1           6         0
+acc=0.9992 | TP=0 FP=4 FN=6 TN=12214
+
+[One-vs-all] classe=6583
+            Pred=0    Pred=1
+True=0       12213         5
+True=1           3         3
+acc=0.9993 | TP=3 FP=5 FN=3 TN=12213
+
+[One-vs-all] classe=5888
+            Pred=0    Pred=1
+True=0       12210         8
+True=1           3         3
+acc=0.9991 | TP=3 FP=8 FN=3 TN=12210
+
+[One-vs-all] classe=2955
+            Pred=0    Pred=1
+True=0       12213         5
+True=1           2         4
+acc=0.9994 | TP=4 FP=5 FN=2 TN=12213
+
+[One-vs-all] classe=2063
+            Pred=0    Pred=1
+True=0       12212         6
+True=1           5         1
+acc=0.9991 | TP=1 FP=6 FN=5 TN=12212
+
+[One-vs-all] classe=2122
+            Pred=0    Pred=1
+True=0       12212         6
+True=1           4         2
+acc=0.9992 | TP=2 FP=6 FN=4 TN=12212
+
+[One-vs-all] classe=1037
+            Pred=0    Pred=1
+True=0       12213         5
+True=1           2         4
+acc=0.9994 | TP=4 FP=5 FN=2 TN=12213
+[ROC] PNG salvo em: C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\roc_ova_10classes.png
+
+[AUTH] Extraindo embeddings...
+[AUTH] Tuning balanceado de thresholds ...
+  pares tuning: {'pairs_used': 121800, 'pos_pairs': 101800, 'neg_pairs': 20000} | métrica otimizada: f1
+
+  [SCORES] cosine: pos vs neg
+    pos: {'n': 101800, 'min': 0.0, 'q05': 0.1994985044002533, 'q25': 0.3618902564048767, 'median': 0.462821364402771, 'q75': 0.5537381768226624, 'q95': 0.6704809665679932, 'max': 1.0, 'mean': 0.4532792270183563, 'std': 0.14234033226966858}
+    neg: {'n': 20000, 'min': 0.0, 'q05': 0.023783618584275246, 'q25': 0.07094550132751465, 'median': 0.12128284573554993, 'q75': 0.18728891015052795, 'q95': 0.29856669902801514, 'max': 0.6139304637908936, 'mean': 0.13645310699939728, 'std': 0.0859851986169815}
+
+  [SCORES] prob_dot: pos vs neg
+    pos: {'n': 101800, 'min': 1.3597650649899151e-05, 'q05': 0.0015670665306970477, 'q25': 0.32150545716285706, 'median': 0.5613270998001099, 'q75': 0.7118285894393921, 'q95': 0.845683753490448, 'max': 0.9759787917137146, 'mean': 0.4966181516647339, 'std': 0.27053195238113403}
+    neg: {'n': 20000, 'min': 2.782102797027619e-07, 'q05': 4.5375950321613345e-06, 'q25': 1.715732469165232e-05, 'median': 4.7722598537802696e-05, 'q75': 0.00014434279000852257, 'q95': 0.0008178643183782697, 'max': 0.11224158853292465, 'mean': 0.000256012543104589, 'std': 0.0016522431978955865}
+
+  [TUNING] cosine: {'metric_optimized': 'f1', 'best_metric_value': 0.9539570447572201, 'best_thr': 0.1774812936782837, 'best_cm': {'TP': 97938, 'TN': 14408, 'FP': 5592, 'FN': 3862}, 'best_metrics': {'acc': 0.9223809523809524, 'precision': 0.9459866705302811, 'recall': 0.9620628683693516, 'f1': 0.9539570447572201, 'balanced_acc': 0.8412314341846758}}
+  [TUNING] prob_dot: {'metric_optimized': 'f1', 'best_metric_value': 0.9806140122763203, 'best_thr': 0.00039616136928088963, 'best_cm': {'TP': 99928, 'TN': 17921, 'FP': 2079, 'FN': 1872}, 'best_metrics': {'acc': 0.9675615763546798, 'precision': 0.9796190457517622, 'recall': 0.9816110019646366, 'f1': 0.9806140122763203, 'balanced_acc': 0.9388305009823184}}
+  [TUNING] id+conf: {'metric_optimized': 'f1', 'best_metric_value': 0.9215538794016696, 'best_thr': 0.02004927210509777, 'best_cm': {'TP': 86991, 'TN': 19999, 'FP': 1, 'FN': 14809}, 'best_metrics': {'acc': 0.8784072249589491, 'precision': 0.9999885046900865, 'recall': 0.8545284872298625, 'f1': 0.9215538794016696, 'balanced_acc': 0.9272392436149313}}
+
+[AUTH] Avaliação em pares: mode=sample | N=12224
+    [AUC-pairs] cosine: 50000/300000 (16.7%)
+    [AUC-pairs] cosine: 100000/300000 (33.3%)
+    [AUC-pairs] cosine: 150000/300000 (50.0%)
+    [AUC-pairs] cosine: 200000/300000 (66.7%)
+    [AUC-pairs] cosine: 250000/300000 (83.3%)
+    [AUC-pairs] cosine: 300000/300000 (100.0%)
+    [AUC-pairs] prob_dot: 300000/300000 (100.0%)
+  [AUTH] ROC-AUC (autenticação): ordenando cosine...
+  [AUTH] ROC-AUC (autenticação): ordenando prob_dot...
+  [AUTH] ROC-AUC (autenticação): ordenando id+conf...
+  [AUTH] ROC-AUC (autenticação, same vs different, threshold-var; pares amostrados, n=300000): cosine=0.7627 | prob_dot=0.8535 | id+conf=0.5199
+
+[AUTH] Macro ROC-AUC por identidade (one-vs-all, mesma identidade vs outras):
+  [AUTH][macro-AUC] classes processadas: 100/2036 | usadas=100 | vel=1945.2 cls/s | ETA~1.0s
+  [AUTH][macro-AUC] classes processadas: 200/2036 | usadas=200 | vel=1962.9 cls/s | ETA~0.9s
+  [AUTH][macro-AUC] classes processadas: 300/2036 | usadas=300 | vel=1761.6 cls/s | ETA~1.0s
+  [AUTH][macro-AUC] classes processadas: 400/2036 | usadas=400 | vel=1788.2 cls/s | ETA~0.9s
+  [AUTH][macro-AUC] classes processadas: 500/2036 | usadas=500 | vel=1856.3 cls/s | ETA~0.8s
+  [AUTH][macro-AUC] classes processadas: 600/2036 | usadas=600 | vel=1874.0 cls/s | ETA~0.8s
+  [AUTH][macro-AUC] classes processadas: 700/2036 | usadas=700 | vel=1900.7 cls/s | ETA~0.7s
+  [AUTH][macro-AUC] classes processadas: 800/2036 | usadas=800 | vel=1890.5 cls/s | ETA~0.7s
+  [AUTH][macro-AUC] classes processadas: 900/2036 | usadas=900 | vel=1915.3 cls/s | ETA~0.6s
+  [AUTH][macro-AUC] classes processadas: 1000/2036 | usadas=1000 | vel=1940.0 cls/s | ETA~0.5s
+  [AUTH][macro-AUC] classes processadas: 1100/2036 | usadas=1100 | vel=1961.3 cls/s | ETA~0.5s
+  [AUTH][macro-AUC] classes processadas: 1200/2036 | usadas=1200 | vel=1978.3 cls/s | ETA~0.4s
+  [AUTH][macro-AUC] classes processadas: 1300/2036 | usadas=1300 | vel=1976.5 cls/s | ETA~0.4s
+  [AUTH][macro-AUC] classes processadas: 1400/2036 | usadas=1400 | vel=1974.9 cls/s | ETA~0.3s
+  [AUTH][macro-AUC] classes processadas: 1500/2036 | usadas=1500 | vel=1984.9 cls/s | ETA~0.3s
+  [AUTH][macro-AUC] classes processadas: 1600/2036 | usadas=1600 | vel=1990.2 cls/s | ETA~0.2s
+  [AUTH][macro-AUC] classes processadas: 1700/2036 | usadas=1700 | vel=1995.5 cls/s | ETA~0.2s
+  [AUTH][macro-AUC] classes processadas: 1800/2036 | usadas=1800 | vel=1988.4 cls/s | ETA~0.1s
+  [AUTH][macro-AUC] classes processadas: 1900/2036 | usadas=1900 | vel=1974.2 cls/s | ETA~0.1s
+  [AUTH][macro-AUC] classes processadas: 2000/2036 | usadas=2000 | vel=1977.4 cls/s | ETA~0.0s
+  [AUTH] Macro ROC-AUC (média simples em 2036 classes): cosine=0.8015 (mediana=0.8144) | prob_dot=0.8628 (mediana=0.8822) | id+conf=0.5484 (mediana=0.5000)
+
+[AUTH] Resultados (cosine-threshold): {'thr': 0.1774812936782837, 'mode': 'sample', 'pairs': 300000, 'acc': 0.72834, 'precision': 0.0009934262166405024, 'recall': 0.6532258064516129, 'f1': 0.0019838354151359297, 'balanced_acc': 0.690798433244881}
+
+[AUTH] Confusão cosine (same vs different)
+            Pred=0    Pred=1
+True=0      218421     81455
+True=1          43        81
+acc=0.7283 | TP=81 FP=81455 FN=43 TN=218421
+[AUTH] Resultados (prob_dot-threshold): {'thr': 0.00039616136928088963, 'mode': 'sample', 'pairs': 300000, 'm_acc': 0.6778633333333334, 'm_f1': 0.0021682791091470403, 'm_balanced_acc': 0.7622838407617084, 'TP': 105, 'TN': 203254, 'FP': 96622, 'FN': 19}
+
+[AUTH] Confusão prob_dot (same vs different)
+            Pred=0    Pred=1
+True=0      203254     96622
+True=1          19       105
+acc=0.6779 | TP=105 FP=96622 FN=19 TN=203254
+[AUTH] Resultados (id+conf): {'thr_conf': 0.02004927210509777, 'mode': 'sample', 'pairs': 300000, 'm_acc': 0.9990866666666667, 'm_f1': 0.035211267605633804, 'm_balanced_acc': 0.5199028501673165, 'TP': 5, 'TN': 299721, 'FP': 155, 'FN': 119}
+
+[AUTH] Confusão id+conf (same vs different)
+            Pred=0    Pred=1
+True=0      299721       155
+True=1         119         5
+acc=0.9991 | TP=5 FP=155 FN=119 TN=299721
+
+[AUTH] Matrizes por âncora (TP/FP/FN/TN vs todas as outras amostras):
+  âncora idx=6063 | true_class=9288
+    cosine: thr=0.1775 | {'acc': 0.7126145287958116, 'precision': 0.0011376564277588168, 'recall': 0.8, 'f1': 0.0022720817949446175, 'balanced_acc': 0.7562893853834193} | cm={'TP': 4, 'TN': 8707, 'FP': 3512, 'FN': 1}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9993455497382199, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.4998772403633685} | cm={'TP': 0, 'TN': 12216, 'FP': 3, 'FN': 5}
+  âncora idx=83 | true_class=5905
+    cosine: thr=0.1775 | {'acc': 0.7421465968586387, 'precision': 0.0006347191367819739, 'recall': 0.4, 'f1': 0.0012674271229404308, 'balanced_acc': 0.5711433014158278} | cm={'TP': 2, 'TN': 9070, 'FP': 3149, 'FN': 3}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9991001308900523, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.49975448072673706} | cm={'TP': 0, 'TN': 12213, 'FP': 6, 'FN': 5}
+  âncora idx=6874 | true_class=7384
+    cosine: thr=0.1775 | {'acc': 0.7644797120418848, 'precision': 0.0003477051460361613, 'recall': 0.2, 'f1': 0.0006942034015966678, 'balanced_acc': 0.4823553482281693} | cm={'TP': 1, 'TN': 9344, 'FP': 2875, 'FN': 4}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9991001308900523, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.49975448072673706} | cm={'TP': 0, 'TN': 12213, 'FP': 6, 'FN': 5}
+  âncora idx=63 | true_class=3661
+    cosine: thr=0.1775 | {'acc': 0.7207951570680629, 'precision': 0.00117096018735363, 'recall': 0.8, 'f1': 0.00233849751534639, 'balanced_acc': 0.7603813732711351} | cm={'TP': 4, 'TN': 8807, 'FP': 3412, 'FN': 1}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9995909685863874, 'precision': 0.5, 'recall': 0.2, 'f1': 0.28571428571428575, 'balanced_acc': 0.5999590801211229} | cm={'TP': 1, 'TN': 12218, 'FP': 1, 'FN': 4}
+  âncora idx=6527 | true_class=9962
+    cosine: thr=0.1775 | {'acc': 0.68782722513089, 'precision': 0.0010473946059177796, 'recall': 0.8, 'f1': 0.002092050209205021, 'balanced_acc': 0.7438906620836403} | cm={'TP': 4, 'TN': 8404, 'FP': 3815, 'FN': 1}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9991819371727748, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.4997954006056142} | cm={'TP': 0, 'TN': 12214, 'FP': 5, 'FN': 5}
+  âncora idx=4276 | true_class=4049
+    cosine: thr=0.1775 | {'acc': 0.6901178010471204, 'precision': 0.0002642007926023778, 'recall': 0.2, 'f1': 0.0005277044854881266, 'balanced_acc': 0.4451591783288321} | cm={'TP': 1, 'TN': 8435, 'FP': 3784, 'FN': 4}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9994273560209425, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.49991816024224567} | cm={'TP': 0, 'TN': 12217, 'FP': 2, 'FN': 5}
+  âncora idx=3878 | true_class=1839
+    cosine: thr=0.1775 | {'acc': 0.7111420157068062, 'precision': 0.001414027149321267, 'recall': 1.0, 'f1': 0.0028240609997175936, 'balanced_acc': 0.8555119076847533} | cm={'TP': 5, 'TN': 8688, 'FP': 3531, 'FN': 0}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9991819371727748, 'precision': 0.14285714285714285, 'recall': 0.2, 'f1': 0.16666666666666666, 'balanced_acc': 0.5997544807267371} | cm={'TP': 1, 'TN': 12213, 'FP': 6, 'FN': 4}
+  âncora idx=9241 | true_class=9946
+    cosine: thr=0.1775 | {'acc': 0.7860765706806283, 'precision': 0.0015278838808250573, 'recall': 0.8, 'f1': 0.003049942813572246, 'balanced_acc': 0.7930354366151076} | cm={'TP': 4, 'TN': 9605, 'FP': 2614, 'FN': 1}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9991819371727748, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.4997954006056142} | cm={'TP': 0, 'TN': 12214, 'FP': 5, 'FN': 5}
+  âncora idx=5968 | true_class=6386
+    cosine: thr=0.1775 | {'acc': 0.6839005235602095, 'precision': 0.0012923235978288964, 'recall': 1.0, 'f1': 0.0025813113061435213, 'balanced_acc': 0.8418855880186595} | cm={'TP': 5, 'TN': 8355, 'FP': 3864, 'FN': 0}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9991001308900523, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.49975448072673706} | cm={'TP': 0, 'TN': 12213, 'FP': 6, 'FN': 5}
+  âncora idx=1776 | true_class=1279
+    cosine: thr=0.1775 | {'acc': 0.6726112565445026, 'precision': 0.0009987515605493133, 'recall': 0.8, 'f1': 0.00199501246882793, 'balanced_acc': 0.7362795646124888} | cm={'TP': 4, 'TN': 8218, 'FP': 4001, 'FN': 1}
+    id+conf: thr_conf=0.0200 | {'acc': 0.9989365183246073, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.49967264096898273} | cm={'TP': 0, 'TN': 12211, 'FP': 8, 'FN': 5}

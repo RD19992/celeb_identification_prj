@@ -1,0 +1,214 @@
+[RUN] 2025-12-22T17:22:52
+[SCRIPT] celeb_multilogit_auth_eval.py
+================================================================================
+
+
+[LOAD] Payload do modelo carregado com sucesso!
+  arquivo: C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\logreg_pm_model_and_classes.joblib
+  n_classes_modelo: 2036
+
+[INFO] 20 IDs de classes (exemplo):
+  [14, 17, 22, 23, 25, 31, 32, 38, 56, 59, 65, 66, 69, 78, 82, 85, 94, 114, 122, 142]
+
+[INFO] Exemplos de parâmetros do modelo (LogReg):
+  W: (8100, 2036) | b: (2036,)
+  best_hparams(payload): {'l1': 0.0, 'l2': 0.0}
+  metrics(payload): {'acc_train_final_sample': 0.9996727614840266, 'acc_test': 0.3424410994764398}
+  cv_info(payload): {'mean_acc_cv': 0.08633333333333333, 'alpha_med': 2.0}
+  model_kind: logistic_regression_softmax_elasticnet_sgd
+
+[DATA] Carregando dataset HOG joblib...
+  path: C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib
+  X: (61118, 8100) float32 | y: (61118,) int64
+  n_classes_total: 2036
+
+[SPLIT] Reconstruindo conjunto de avaliação (teste alinhado ao modelo)...
+  X_eval: (12224, 8100) float32
+  y_eval: (12224,) int64 | classes_present: 2036
+  N=12224 (IDs válidos: 0..12223)
+
+[SPLIT] Reconstruindo conjunto de TUNING (treino alinhado ao modelo) para autenticação (anti-leakage)...
+  X_tune: (48894, 8100) float32
+  y_tune: (48894,) int64 | classes_present: 2036
+
+[IDENTIFICAÇÃO] Acurácia no conjunto de avaliação:
+  acc=0.3424 (4186/12224)
+
+[IDENTIFICAÇÃO] One-vs-all (10 classes aleatórias): classes=[289, 9028, 2471, 3768, 6583, 5888, 2955, 2063, 2122, 1037]
+
+[One-vs-all] classe=289
+            Pred=0    Pred=1
+True=0       12214         4
+True=1           6         0
+acc=0.9992 | TP=0 FP=4 FN=6 TN=12214
+
+[One-vs-all] classe=9028
+            Pred=0    Pred=1
+True=0       12214         4
+True=1           2         4
+acc=0.9995 | TP=4 FP=4 FN=2 TN=12214
+
+[One-vs-all] classe=2471
+            Pred=0    Pred=1
+True=0       12216         2
+True=1           1         5
+acc=0.9998 | TP=5 FP=2 FN=1 TN=12216
+
+[One-vs-all] classe=3768
+            Pred=0    Pred=1
+True=0       12215         3
+True=1           6         0
+acc=0.9993 | TP=0 FP=3 FN=6 TN=12215
+
+[One-vs-all] classe=6583
+            Pred=0    Pred=1
+True=0       12213         5
+True=1           2         4
+acc=0.9994 | TP=4 FP=5 FN=2 TN=12213
+
+[One-vs-all] classe=5888
+            Pred=0    Pred=1
+True=0       12214         4
+True=1           4         2
+acc=0.9993 | TP=2 FP=4 FN=4 TN=12214
+
+[One-vs-all] classe=2955
+            Pred=0    Pred=1
+True=0       12212         6
+True=1           2         4
+acc=0.9993 | TP=4 FP=6 FN=2 TN=12212
+
+[One-vs-all] classe=2063
+            Pred=0    Pred=1
+True=0       12215         3
+True=1           6         0
+acc=0.9993 | TP=0 FP=3 FN=6 TN=12215
+
+[One-vs-all] classe=2122
+            Pred=0    Pred=1
+True=0       12215         3
+True=1           5         1
+acc=0.9993 | TP=1 FP=3 FN=5 TN=12215
+
+[One-vs-all] classe=1037
+            Pred=0    Pred=1
+True=0       12216         2
+True=1           3         3
+acc=0.9996 | TP=3 FP=2 FN=3 TN=12216
+[ROC] PNG salvo em: C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\roc_ova_10classes_logreg.png
+
+[AUTH] Extraindo embeddings (logits normalizados)...
+[AUTH] Tuning balanceado de thresholds ...
+    [AUC-pairs] cosine(logits_norm) [tuning]: 121800/121800 (100.0%) | 188,628 pares/s | ETA~0.0s
+    [AUC-pairs] prob_dot [tuning]: 121800/121800 (100.0%) | 125,738 pares/s | ETA~0.0s
+  pares tuning: {'pairs_used': 121800, 'pos_pairs': 101800, 'neg_pairs': 20000} | métrica otimizada: f1
+
+  [SCORES] cosine(logits): pos vs neg
+    pos: {'n': 101800, 'min': -0.7921778559684753, 'q05': -0.24298281967639923, 'q25': 0.13603094220161438, 'median': 0.3931879699230194, 'q75': 0.5949311256408691, 'q95': 0.7865996360778809, 'max': 1.0, 'mean': 0.34721508622169495, 'std': 0.31806182861328125}
+    neg: {'n': 20000, 'min': -0.8179771900177002, 'q05': -0.5580637454986572, 'q25': -0.25884097814559937, 'median': 0.020374897867441177, 'q75': 0.3021467328071594, 'q95': 0.605759859085083, 'max': 0.9240372180938721, 'mean': 0.02236435003578663, 'std': 0.35822343826293945}
+
+  [SCORES] prob_dot(softmax): pos vs neg
+    pos: {'n': 101800, 'min': 3.686392301460728e-05, 'q05': 0.9981635212898254, 'q25': 0.9988530874252319, 'median': 0.9992867708206177, 'q75': 0.9997406601905823, 'q95': 0.9999977350234985, 'max': 1.0, 'mean': 0.998664140701294, 'std': 0.02367585338652134}
+    neg: {'n': 20000, 'min': 9.557389865802708e-24, 'q05': 5.664250269865885e-17, 'q25': 1.121790174315497e-13, 'median': 1.1748536171696244e-11, 'q75': 7.303480042963884e-10, 'q95': 1.593476497419033e-07, 'max': 0.0002741912321653217, 'mean': 3.5604850268100563e-07, 'std': 5.242906354396837e-06}
+
+  [TUNING] cosine(logits): {'metric_optimized': 'f1', 'best_metric_value': 0.9134256526674235, 'best_thr': -0.45179814100265503, 'best_cm': {'TP': 100591, 'TN': 2141, 'FP': 17859, 'FN': 1209}, 'best_metrics': {'acc': 0.8434482758620689, 'precision': 0.8492275221612495, 'recall': 0.9881237721021611, 'f1': 0.9134256526674235, 'balanced_acc': 0.5475868860510805}}
+  [TUNING] prob_dot: {'metric_optimized': 'f1', 'best_metric_value': 0.9995233485501442, 'best_thr': 0.9960947036743164, 'best_cm': {'TP': 101703, 'TN': 20000, 'FP': 0, 'FN': 97}, 'best_metrics': {'acc': 0.9992036124794745, 'precision': 1.0, 'recall': 0.9990471512770137, 'f1': 0.9995233485501442, 'balanced_acc': 0.9995235756385068}}
+  [TUNING] id+conf: {'metric_optimized': 'f1', 'best_metric_value': 0.9997150465260242, 'best_thr': 0.9126660227775574, 'best_cm': {'TP': 101742, 'TN': 20000, 'FP': 0, 'FN': 58}, 'best_metrics': {'acc': 0.9995238095238095, 'precision': 1.0, 'recall': 0.9994302554027505, 'f1': 0.9997150465260242, 'balanced_acc': 0.9997151277013753}}
+
+[AUTH] Avaliação em pares: mode=sample | N=12224
+    [AUC-pairs] cosine(logits_norm): 300000/300000 (100.0%) | 193,202 pares/s | ETA~0.0s
+    [AUC-pairs] prob_dot: 300000/300000 (100.0%) | 194,572 pares/s | ETA~0.0s
+
+[AUTH] ROC-AUC (pares amostrados):
+  cosine(logits_norm): 0.731698 | prob_dot: 0.833700 | id+conf: 0.568330 | n_pairs=300000
+
+[AUTH] Macro ROC-AUC por identidade (one-vs-all, em pares):
+  [AUTH][macro-AUC] classes processadas: 100/2036 | usadas=100 | vel=1028.8 cls/s | ETA~1.9s
+  [AUTH][macro-AUC] classes processadas: 200/2036 | usadas=200 | vel=1016.3 cls/s | ETA~1.8s
+  [AUTH][macro-AUC] classes processadas: 300/2036 | usadas=300 | vel=972.0 cls/s | ETA~1.8s
+  [AUTH][macro-AUC] classes processadas: 400/2036 | usadas=400 | vel=980.7 cls/s | ETA~1.7s
+  [AUTH][macro-AUC] classes processadas: 500/2036 | usadas=500 | vel=980.4 cls/s | ETA~1.6s
+  [AUTH][macro-AUC] classes processadas: 600/2036 | usadas=600 | vel=960.8 cls/s | ETA~1.5s
+  [AUTH][macro-AUC] classes processadas: 700/2036 | usadas=700 | vel=947.7 cls/s | ETA~1.4s
+  [AUTH][macro-AUC] classes processadas: 800/2036 | usadas=800 | vel=897.9 cls/s | ETA~1.4s
+  [AUTH][macro-AUC] classes processadas: 900/2036 | usadas=900 | vel=899.2 cls/s | ETA~1.3s
+  [AUTH][macro-AUC] classes processadas: 1000/2036 | usadas=1000 | vel=908.4 cls/s | ETA~1.1s
+  [AUTH][macro-AUC] classes processadas: 1100/2036 | usadas=1100 | vel=894.7 cls/s | ETA~1.0s
+  [AUTH][macro-AUC] classes processadas: 1200/2036 | usadas=1200 | vel=863.9 cls/s | ETA~1.0s
+  [AUTH][macro-AUC] classes processadas: 1300/2036 | usadas=1300 | vel=861.1 cls/s | ETA~0.9s
+  [AUTH][macro-AUC] classes processadas: 1400/2036 | usadas=1400 | vel=868.4 cls/s | ETA~0.7s
+  [AUTH][macro-AUC] classes processadas: 1500/2036 | usadas=1500 | vel=868.7 cls/s | ETA~0.6s
+  [AUTH][macro-AUC] classes processadas: 1600/2036 | usadas=1600 | vel=873.9 cls/s | ETA~0.5s
+  [AUTH][macro-AUC] classes processadas: 1700/2036 | usadas=1700 | vel=875.6 cls/s | ETA~0.4s
+  [AUTH][macro-AUC] classes processadas: 1800/2036 | usadas=1800 | vel=880.9 cls/s | ETA~0.3s
+  [AUTH][macro-AUC] classes processadas: 1900/2036 | usadas=1900 | vel=881.7 cls/s | ETA~0.2s
+  [AUTH][macro-AUC] classes processadas: 2000/2036 | usadas=2000 | vel=885.2 cls/s | ETA~0.0s
+  cos_mean=0.743676 | prob_mean=0.850290 | conf_mean=0.578289 | n_ids=2036
+  cos_median=0.756389 | prob_median=0.870000 | conf_median=0.533333
+
+[AUTH] Resultados (cosine(logits)-threshold): {'thr': -0.45179814100265503, 'mode': 'sample', 'pairs': 300000, 'm_acc': 0.10756333333333333, 'm_f1': 0.0009179892304190285, 'm_balanced_acc': 0.5495665627814336, 'TP': 123, 'TN': 32146, 'FP': 267730, 'FN': 1}
+
+[AUTH] Confusão cosine(logits) (same vs different)
+            Pred=0    Pred=1
+True=0       32146    267730
+True=1           1       123
+acc=0.1076 | TP=123 FP=267730 FN=1 TN=32146
+[AUTH] Resultados (prob_dot-threshold): {'thr': 0.9960947036743164, 'mode': 'sample', 'pairs': 300000, 'm_acc': 0.9995966666666667, 'm_f1': 0.06201550387596899, 'm_balanced_acc': 0.5161273649022241, 'TP': 4, 'TN': 299875, 'FP': 1, 'FN': 120}
+
+[AUTH] Confusão prob_dot (same vs different)
+            Pred=0    Pred=1
+True=0      299875         1
+True=1         120         4
+acc=0.9996 | TP=4 FP=1 FN=120 TN=299875
+[AUTH] Resultados (id+conf): {'thr_conf': 0.9126660227775574, 'mode': 'sample', 'pairs': 300000, 'm_acc': 0.9996, 'm_f1': 0.10447761194029852, 'm_balanced_acc': 0.5282208043840917, 'TP': 7, 'TN': 299873, 'FP': 3, 'FN': 117}
+
+[AUTH] Confusão id+conf (same vs different)
+            Pred=0    Pred=1
+True=0      299873         3
+True=1         117         7
+acc=0.9996 | TP=7 FP=3 FN=117 TN=299873
+
+[AUTH] Matrizes por âncora (TP/FP/FN/TN vs todas as outras amostras):
+  âncora idx=6063 | true_class=9288
+    cosine(logits): thr=-0.4518 | {'acc': 0.0568553664921466, 'precision': 0.00043350095370209816, 'recall': 1.0, 'f1': 0.0008666262241095415, 'balanced_acc': 0.5282347164252393} | cm={'TP': 5, 'TN': 690, 'FP': 11529, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=83 | true_class=5905
+    cosine(logits): thr=-0.4518 | {'acc': 0.00981675392670157, 'precision': 0.0004129160128829796, 'recall': 1.0, 'f1': 0.0008254911672445105, 'balanced_acc': 0.5047057860708732} | cm={'TP': 5, 'TN': 115, 'FP': 12104, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=6874 | true_class=7384
+    cosine(logits): thr=-0.4518 | {'acc': 0.15608638743455497, 'precision': 0.0004844491812808836, 'recall': 1.0, 'f1': 0.0009684292078249078, 'balanced_acc': 0.5778705295032327} | cm={'TP': 5, 'TN': 1903, 'FP': 10316, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=63 | true_class=3661
+    cosine(logits): thr=-0.4518 | {'acc': 0.25237238219895286, 'precision': 0.0005468066491688539, 'recall': 1.0, 'f1': 0.0010930156301235108, 'balanced_acc': 0.6260332269416482} | cm={'TP': 5, 'TN': 3080, 'FP': 9139, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=6527 | true_class=9962
+    cosine(logits): thr=-0.4518 | {'acc': 0.1950261780104712, 'precision': 0.0005078720162519045, 'recall': 1.0, 'f1': 0.001015228426395939, 'balanced_acc': 0.5973483918487601} | cm={'TP': 5, 'TN': 2379, 'FP': 9840, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=4276 | true_class=4049
+    cosine(logits): thr=-0.4518 | {'acc': 0.12483638743455497, 'precision': 0.00037379684141669004, 'recall': 0.8, 'f1': 0.0007472445357743321, 'balanced_acc': 0.4622800556510353} | cm={'TP': 4, 'TN': 1522, 'FP': 10697, 'FN': 1}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=3878 | true_class=1839
+    cosine(logits): thr=-0.4518 | {'acc': 0.2826407068062827, 'precision': 0.0005698655117392296, 'recall': 1.0, 'f1': 0.0011390818999886094, 'balanced_acc': 0.6411735821261969} | cm={'TP': 5, 'TN': 3450, 'FP': 8769, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=9241 | true_class=9946
+    cosine(logits): thr=-0.4518 | {'acc': 0.0630726439790576, 'precision': 0.0004363763309478094, 'recall': 1.0, 'f1': 0.0008723719794120213, 'balanced_acc': 0.5313446272199034} | cm={'TP': 5, 'TN': 766, 'FP': 11453, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=5968 | true_class=6386
+    cosine(logits): thr=-0.4518 | {'acc': 0.12025523560209424, 'precision': 0.00046472720513058836, 'recall': 1.0, 'f1': 0.000929022668153103, 'balanced_acc': 0.5599476225550373} | cm={'TP': 5, 'TN': 1465, 'FP': 10754, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9995909685863874, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'balanced_acc': 0.5} | cm={'TP': 0, 'TN': 12219, 'FP': 0, 'FN': 5}
+  âncora idx=1776 | true_class=1279
+    cosine(logits): thr=-0.4518 | {'acc': 0.009898560209424083, 'precision': 0.0004129501156260324, 'recall': 1.0, 'f1': 0.000825559316436886, 'balanced_acc': 0.5047467059497504} | cm={'TP': 5, 'TN': 116, 'FP': 12103, 'FN': 0}
+    id+conf: thr_conf=0.9127 | {'acc': 0.9998363874345549, 'precision': 1.0, 'recall': 0.6, 'f1': 0.7499999999999999, 'balanced_acc': 0.8} | cm={'TP': 3, 'TN': 12219, 'FP': 0, 'FN': 2}
+  [AUC][macro] classes_processadas=200/2036 | aucs_ok=200 | 7.9s
+  [AUC][macro] classes_processadas=400/2036 | aucs_ok=400 | 15.9s
+  [AUC][macro] classes_processadas=600/2036 | aucs_ok=600 | 23.8s
+  [AUC][macro] classes_processadas=800/2036 | aucs_ok=800 | 31.7s
+  [AUC][macro] classes_processadas=1000/2036 | aucs_ok=1000 | 39.6s
+  [AUC][macro] classes_processadas=1200/2036 | aucs_ok=1200 | 47.5s
+  [AUC][macro] classes_processadas=1400/2036 | aucs_ok=1400 | 55.4s
+  [AUC][macro] classes_processadas=1600/2036 | aucs_ok=1600 | 63.5s
+  [AUC][macro] classes_processadas=1800/2036 | aucs_ok=1800 | 71.4s
+  [AUC][macro] classes_processadas=2000/2036 | aucs_ok=2000 | 79.4s
+
+[AUC] Macro AUC (one-vs-rest) - todas as classes:
+  macro_auc=0.945175 | mediana=0.968544 | n_classes=2036 | min=0.328300 | max=1.000000
