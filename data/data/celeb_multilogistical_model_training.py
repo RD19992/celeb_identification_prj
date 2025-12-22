@@ -244,8 +244,9 @@ def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
 # ============================================================
 # Objective / grad (CE + L2) e proximal L1
 # ============================================================
-# Referências para código e implementação:  C. M. Bishop, Pattern Recognition and Machine Learning, Springer, 2006.
-# Referências para código e implementação:  T. Hastie, R. Tibshirani, and J. Friedman, The Elements of Statistical Learning, 2nd ed., Springer, 2009.
+# Referências para código e implementação:  C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006. (Cap.4 - Regressão logística/softmax e objetivo via NLL/cross-entropy em modelos lineares para classificação)
+# Proximal L1 especificamente - metodo numério aplicado no GD para calculo otimizado do L1, dado que ||W|| não diferenciável
+# Referência da implementação: T. Hastie, R. Tibshirani, and M. Wainwright, Statistical Learning with Sparsity: The Lasso and Generalizations. CRC Press, 2015.
 
 def data_loss_ce(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray):
     Z = X @ W + b
@@ -292,8 +293,14 @@ def proximal_l1(W: np.ndarray, thresh: float):
 
 
 # ============================================================
-# Armijo (por época) em probe batch
+# Armijo (por época) com probe batch
 # ============================================================
+
+# Referência - Armijo em geral: L. Armijo, “Minimization of Functions Having Lipschitz Continuous First Partial Derivatives,” Pacific Journal of Mathematics, 1966.
+# Referência - Implementação com probe batch: J. Nocedal and S. J. Wright, Numerical Optimization, 2nd ed., Springer, 2006. Capítulo 3 (Line Search Methods)
+# O que probe batch faz é testar condições de Armijo por batch em vez de por ponto para otimizar custo
+# Referência - C. Paquette et al., “A Stochastic Line Search Method with Expected Complexity” SIAM J. Optimization, 2020
+# Referência - M. Mahsereci and P. Hennig, “Probabilistic Line Searches for Stochastic Optimization,” JMLR, 2017.
 
 def armijo_alpha_epoch(
     W: np.ndarray, b: np.ndarray,
@@ -330,6 +337,15 @@ def armijo_alpha_epoch(
 # ============================================================
 # Treino SGD + proximal L1 (elastic net)
 # ============================================================
+# Referências para código e implementação:  C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006. (Cap.4 - Regressão logística/softmax e objetivo via NLL/cross-entropy em modelos lineares para classificação)
+# Proximal L1 especificamente - metodo numérico aplicado no GD para calculo otimizado do L1, dado que ||W|| não diferenciável
+# Referência da implementação: T. Hastie, R. Tibshirani, and M. Wainwright, Statistical Learning with Sparsity: The Lasso and Generalizations. CRC Press, 2015
+# Referência código SGD: H. Robbins and S. Monro, “A Stochastic Approximation Method,” Annals of Mathematical Statistics, 1951.
+# Referência Elastic Net: H. Zou and T. Hastie, “Regularization and Variable Selection via the Elastic Net,” J. Royal Statistical Society: Series B, 2005
+
+      - SGD: Robbins & Monro [10], Bottou [11]
+      - Elastic Net: Zou & Hastie [5]
+
 
 def treinar_softmax_elasticnet_sgd(
     X_train: np.ndarray,
@@ -490,8 +506,10 @@ def matriz_confusao_top_k(y_true: np.ndarray, y_pred: np.ndarray, top_k: int):
 
 
 # ============================================================
-# CV: combos L1/L2 limitados (16 combos)
+# CV: combos L1/L2
 # ============================================================
+
+#
 
 def montar_combos_l1_l2(grid_l1, grid_l2, max_combos: int, strategy: str, seed: int):
     grid_l1 = [float(x) for x in grid_l1]
