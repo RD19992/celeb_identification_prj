@@ -138,7 +138,7 @@ CONFIG = {
     "early_stop_restore_best": True,
 
     # split interno treino/val no treino final (para early stopping)
-    "final_val_frac": 0.10,
+    "final_val_frac": 0.10,a
     "final_val_seed": 2026,
 
     # padronização
