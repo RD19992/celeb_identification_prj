@@ -1659,5 +1659,87 @@ def main():
     salvar_config_mlp_txt(out_dir, CONFIG, best_hparams, treino_stats=modelo.get("stats", None))
     salvar_erro_mlp_txt(out_dir, acc_tr, acc_te)
 
+# ============================================================
+# CAPTURA DE OUTPUT (stdout/stderr) -> TXT na mesma pasta
+# ============================================================
+
 if __name__ == "__main__":
-    main()
+    import sys
+    import atexit
+    import traceback
+    import platform
+    from datetime import datetime
+    from pathlib import Path
+
+    out_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
+    ts_hdr = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts_fn = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = out_dir / f"output_mlp_{ts_fn}.txt"
+
+    class _TeeStream:
+        def __init__(self, primary, secondary):
+            self._p = primary
+            self._s = secondary
+
+        def write(self, data):
+            try:
+                self._p.write(data)
+            except Exception:
+                pass
+            try:
+                self._s.write(data)
+            except Exception:
+                pass
+            return len(data)
+
+        def flush(self):
+            try:
+                self._p.flush()
+            except Exception:
+                pass
+            try:
+                self._s.flush()
+            except Exception:
+                pass
+
+        def isatty(self):
+            return getattr(self._p, "isatty", lambda: False)()
+
+        def __getattr__(self, name):
+            return getattr(self._p, name)
+
+    _f = open(log_path, "w", encoding="utf-8", errors="replace")
+    _orig_out, _orig_err = sys.stdout, sys.stderr
+    sys.stdout = _TeeStream(_orig_out, _f)
+    sys.stderr = _TeeStream(_orig_err, _f)
+
+    def _close_log():
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.stdout, sys.stderr = _orig_out, _orig_err
+        try:
+            _f.flush()
+            _f.close()
+        except Exception:
+            pass
+
+    atexit.register(_close_log)
+
+    print("=" * 80)
+    print(f"EXECUÇÃO: {ts_hdr}")
+    print(f"SCRIPT: {Path(__file__).name if '__file__' in globals() else '<interactive>'}")
+    print(f"PYTHON: {sys.version.replace(chr(10), ' ')}")
+    print(f"PLATFORM: {platform.platform()}")
+    print(f"ARGV: {sys.argv}")
+    print("=" * 80)
+    print()
+
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        raise
+
