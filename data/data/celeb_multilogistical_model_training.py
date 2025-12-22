@@ -1,21 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-CELEBA HOG -> Softmax Regression "from scratch" (Elastic Net + Armijo)
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
 
-VERSÃO OTIMIZADA PARA VELOCIDADE (refatorada):
-  1) Remove one-hot com loop Python (gargalo). Usa y_idx via np.searchsorted.
-  2) Treino em mini-batches (SGD). Evita softmax gigante de uma vez.
-  3) Armijo é feito 1x por ÉPOCA em um "probe batch" pequeno (continua só usando treino/CV).
-  4) Mantém normalização /m:
-       - grad CE usa média do batch (SGD)
-       - L2 e L1 são normalizados por m_total (tamanho do treino usado no modelo).
-  5) Corrige edge-case que quebrava quando frac=1.0 (train_size == n_samples no StratifiedShuffleSplit).
-
-DICA DE PERFORMANCE:
-  - Se você tiver muitas classes (ex: 2036) e k_folds=5, "min 5 por classe" já força >= 10180 amostras no CV.
-    Isso é independente de cv_frac. Para CV mais barato:
-      * reduza frac_classes (prototipagem), OU
-      * defina CONFIG["cv_max_classes"] (CV em subconjunto de classes).
+Código de treinamento de modelo a partir de arquivo extraído de processo HOG
+Treina o Modelo, avalia e salva resultados
+Multilayer Perceptron com 1 Hidden Layer
 """
 
 from __future__ import annotations
@@ -28,7 +19,7 @@ from sklearn.metrics import confusion_matrix
 
 
 # ============================================================
-# CONFIG
+# CONFIGURAÇÕES - Parâmetros de execução e hiperparâmetros
 # ============================================================
 
 CONFIG = {
@@ -48,7 +39,7 @@ CONFIG = {
     "k_folds": 5,
     "cv_frac": 0.01,
     "cv_min_por_classe": None,    # se None -> usa k_folds
-    "cv_max_classes": 600,       # opcional: limita nº de classes usadas no CV (acelera MUITO)
+    "cv_max_classes": 600,       # opcional: limita nº de classes usadas no CV
 
     # treino final
     "final_frac": 1.00,
@@ -63,6 +54,8 @@ CONFIG = {
     "batch_size_final": 2048,
 
     # Armijo (por época, usando probe batch)
+    # Referência 1 para Armijo: L. Armijo, “Minimization of Functions Having Lipschitz Continuous First Partial Derivatives,” Pacific Journal of Mathematics, 1966
+    # Referência 2 para Armijo: J. Nocedal and S. J. Wright, Numerical Optimization, 2nd ed., Springer, 2006.
     "armijo_alpha0": 2.0,
     "armijo_growth": 1.25,
     "armijo_beta": 0.5,
@@ -72,6 +65,9 @@ CONFIG = {
     "armijo_probe_batch": 2048,
 
     # padronização
+    # Estabilidade numérica para saída do HOG, baseada nas normalizações de PCA
+    # Referência: C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006. (Ch. 12, Sec. 12.1.3, Eq. 12.22, p. ~568)
+    # Referência: Ioffe & Szegedy (2015), Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift
     "eps_std": 1e-6,
 
     # elastic net grid
@@ -90,7 +86,7 @@ CONFIG = {
 
 
 # ============================================================
-# IO / dataset
+# Carga do Dataset HOG (do joblib)
 # ============================================================
 
 def carregar_dataset(path: str):
@@ -127,7 +123,7 @@ def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.nda
 
 
 # ============================================================
-# Padronização
+# Padronização da entrada HOG - funções
 # ============================================================
 
 def fit_standardizer(X: np.ndarray, eps: float = 1e-6):
@@ -150,9 +146,6 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray):
 def amostrar_com_min_por_classe(y: np.ndarray, frac: float, seed: int, min_por_classe: int):
     """
     Retorna (idx_sample, classes_ok). Garante >= min_por_classe por classe (para classes que têm suporte).
-    Edge-cases corrigidos:
-      - Se frac>=1 -> retorna todos os índices (sem StratifiedShuffleSplit).
-      - Se add >= restantes.size -> pega todos os restantes (sem StratifiedShuffleSplit).
     """
     y = np.asarray(y)
     n = int(y.shape[0])
@@ -195,7 +188,7 @@ def amostrar_com_min_por_classe(y: np.ndarray, frac: float, seed: int, min_por_c
     if add <= 0:
         return np.sort(idx_keep), np.sort(classes_ok)
 
-    # FIX: se add cobre tudo, pega tudo sem StratifiedShuffleSplit (evita train_size==n_samples)
+    # se add cobre tudo, pega tudo sem StratifiedShuffleSplit (evita train_size==n_samples)
     if add >= restantes.size:
         idx_final = np.concatenate([idx_keep, restantes]).astype(np.int64, copy=False)
         return np.sort(np.unique(idx_final)), np.sort(classes_ok)
@@ -251,6 +244,8 @@ def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
 # ============================================================
 # Objective / grad (CE + L2) e proximal L1
 # ============================================================
+# Referências para código e implementação:  C. M. Bishop, Pattern Recognition and Machine Learning, Springer, 2006.
+# Referências para código e implementação:  T. Hastie, R. Tibshirani, and J. Friedman, The Elements of Statistical Learning, 2nd ed., Springer, 2009.
 
 def data_loss_ce(W: np.ndarray, b: np.ndarray, X: np.ndarray, y_idx: np.ndarray):
     Z = X @ W + b
