@@ -1660,6 +1660,69 @@ def main():
             else:
                 print("Comando inválido (use 1, 2 ou q).")
 
+# ============================================================
+# OUTPUT LOGGING (TEE) - cole acima do bloco if __name__ == "__main__":
+# ============================================================
+import sys
+import io
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+class _Tee(io.TextIOBase):
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s):
+        for st in self._streams:
+            try:
+                st.write(s)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+def _run_with_output_log(main_func, log_prefix="mlp_ident_auth_eval"):
+    out_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = out_dir / f"{log_prefix}_output_{ts}.txt"
+
+    old_out, old_err = sys.stdout, sys.stderr
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"[RUN] {datetime.now().isoformat(timespec='seconds')}\n")
+            f.write(f"[SCRIPT] {Path(__file__).name if '__file__' in globals() else 'interactive'}\n")
+            f.write("=" * 80 + "\n\n")
+            f.flush()
+
+            sys.stdout = _Tee(old_out, f)
+            sys.stderr = _Tee(old_err, f)
+
+            try:
+                main_func()
+            except SystemExit:
+                raise
+            except Exception:
+                traceback.print_exc()
+                raise
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.stdout, sys.stderr = old_out, old_err
+
+    print(f"[LOG] Output salvo em: {log_path}")
+
 
 if __name__ == "__main__":
-    main()
+     _run_with_output_log(main, log_prefix="mlp_ident_auth_eval")
