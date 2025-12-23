@@ -32,6 +32,10 @@ from sklearn.model_selection import train_test_split
 # Referências (contexto de verificação por embeddings):
     # - Schroff et al., "FaceNet" (embeddings + cosine para verificação), 2015.
     # - Deng et al., "ArcFace" / Wang et al., "CosFace" (margens em espaço angular), 2018.
+# Referências em formato completo
+    # - T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006
+    # - E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
+
 
 SCRIPT_CONFIG = {
     # nome do arquivo salvo pelo script de treino (na mesma pasta)

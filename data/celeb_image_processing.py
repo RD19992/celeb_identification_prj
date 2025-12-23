@@ -1,5 +1,16 @@
-##Importação de bibliotecas - Precisamos ver o que de fato está sendo usado e remover o que tenha implementação pronta
+# -*- coding: utf-8 -*-
+"""
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
 
+Código de Processamento do Dataset CELEB-A
+Extrai, transforma para tons de cinza e padroniza tamanho
+Faz extração de feaures pra Histogram of Gradients (HOG)
+Seleciona de forma estratificada 20% das classes
+"""
+
+##Importação de bibliotecas
 import os
 import numpy as np
 import pandas as pd
@@ -29,7 +40,7 @@ IDENTITY_FILE = DATA_DIR / "identity_CelebA.txt"
 print(IMAGES_DIR.exists())     # se correto retorna TRUE
 
 ## Contagem de arquivos
-print(len(os.listdir(IMAGES_DIR))) #Deve retornar 202599
+print(len(os.listdir(IMAGES_DIR))) #Retorns 202599 imagens
 
 ## Verificando se existe o mapeamento de imagem e pessoa (número de identificação)
 
@@ -60,7 +71,7 @@ df.to_csv(labels_path, index=False)
 print("Labels salvos em:", labels_path)
 print(df.head())
 
-#Seleção por classe
+#Seleção por classe estratificada
 
 TOP_CLASS_FRACTION = 0.20  # 20% das classes com mais imagens
 
@@ -112,7 +123,7 @@ plt.figure(figsize=(12, 4))
 
 for i, row in enumerate(sample.itertuples(), start=1):
     # usa o mesmo diretório das imagens originais
-    img_path = os.path.join(IMAGES_DIR, row.image_name)  # troque IMAGES_DIR se o seu nome for outro
+    img_path = os.path.join(IMAGES_DIR, row.image_name)  # trocar IMAGES_DIR se nome for outro
 
     # aplica pré-processamento para amostra de 5 imagens (128x128, escala de cinza, [0,1])
     img = preprocess_image_cv2(img_path)
