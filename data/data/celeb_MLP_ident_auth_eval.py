@@ -25,11 +25,19 @@ from sklearn.model_selection import train_test_split
 # CONFIG DO SCRIPT (ajuste aqui)
 # ============================================================
 
+# Ref: Fawcett (2006) — ROC/AUC como diagnóstico de classificadores.
+# Ref: Rumelhart, Hinton & Williams (1986) + Goodfellow et al. (2016) — forward pass (inferência) em MLP.
+# Ref: Schroff et al. (2015) — construção de pares positivos para verificação/threshold tuning.
+# Ref: Schroff et al. (2015) — similaridade por dot/cosseno; avaliação em lote.
+# Referências (contexto de verificação por embeddings):
+    # - Schroff et al., "FaceNet" (embeddings + cosine para verificação), 2015.
+    # - Deng et al., "ArcFace" / Wang et al., "CosFace" (margens em espaço angular), 2018.
+
 SCRIPT_CONFIG = {
     # nome do arquivo salvo pelo script de treino (na mesma pasta)
     "model_payload_file": "mlp_pm_model_and_classes.joblib",
 
-    # se quiser sobrescrever o caminho do joblib HOG/dataset (senão usa config_snapshot do payload)
+    # se quiser sobrescrever o caminho do joblib HOG/dataset
     "dataset_path_override": None,  # ex.: r"C:\\...\\celeba_hog_128x128_o9.joblib"
 
     # aleatoriedade local deste script (não altera o split do treino, só prints/amostragens)
@@ -46,8 +54,7 @@ SCRIPT_CONFIG = {
     },
 
     # OBS: "macro_auc" abaixo mede AUC de IDENTIFICAÇÃO (one-vs-rest por classe).
-    # Isso NÃO é AUC de autenticação (same vs different). Para evitar confusão,
-    # deixamos DESLIGADO por padrão. Você pode ligar quando quiser.
+    # Isso NÃO é AUC de autenticação (same vs different).
     "macro_auc": {
         "enable": False,
         "use_fast_auc": True,  # True: usa roc_auc_fast (mais rápido); False: usa roc_curve_simple
@@ -82,8 +89,6 @@ SCRIPT_CONFIG = {
         #   1) para cada identidade/classe c, amostra pares POS (c vs c) e NEG (c vs ~c)
         #   2) calcula AUC(c)
         #   3) tira a média simples dos AUC(c) em todas as classes
-        # Isso corresponde ao que você descreveu como "média do AUC one-vs-all de todas as classes"
-        # no contexto de autenticação (verificação).
         "macro_auc": {
             "enable": True,
             "pos_pairs_per_class": 30,
@@ -174,7 +179,7 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.n
 
 
 # ============================================================
-# MLP: Funções mínimas para inferência (COPIADAS do treino)
+# MLP: Funções mínimas para inferência
 # ============================================================
 
 def stable_softmax(Z: np.ndarray):
@@ -1661,7 +1666,7 @@ def main():
                 print("Comando inválido (use 1, 2 ou q).")
 
 # ============================================================
-# OUTPUT LOGGING (TEE) - cole acima do bloco if __name__ == "__main__":
+# OUTPUT LOGGING (TEE)
 # ============================================================
 import sys
 import io
