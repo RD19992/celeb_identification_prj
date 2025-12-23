@@ -17,28 +17,20 @@ Notas:
 """
 
 #Referências
-[1] N. Dalal and B. Triggs, “Histograms of Oriented Gradients for Human Detection,” in Proc. IEEE CVPR, 2005.
-[2] Z. Liu, P. Luo, X. Wang, and X. Tang, “Deep Learning Face Attributes in the Wild,” in Proc. IEEE ICCV, 2015. (CelebA)
 # C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006.
 # K. P. Murphy, Machine Learning: A Probabilistic Perspective. MIT Press, 2012.
-[5] P. McCullagh and J. A. Nelder, Generalized Linear Models, 2nd ed. Chapman & Hall/CRC, 1989.
 # T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006.
-[7] J. A. Hanley and B. J. McNeil, “The meaning and use of the area under a ROC curve,” Radiology, vol. 143, no. 1, pp. 29–36, 1982.
-[8] D. J. Hand and R. J. Till, “A Simple Generalisation of the Area Under the ROC Curve for Multiple Class Classification Problems,” Machine Learning, vol. 45, pp. 171–186, 2001.
-# [9] C. J. van Rijsbergen, Information Retrieval, 2nd ed. Butterworth-Heinemann, 1979. (F-measure)
-# [10] D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC…,” Journal of Machine Learning Technologies, 2011.
+# C. J. van Rijsbergen, Information Retrieval, 2nd ed. Butterworth-Heinemann, 1979. (F-measure)
+# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC…,” Journal of Machine Learning Technologies, 2011.
 # B. Schölkopf and A. J. Smola, Learning with Kernels. MIT Press, 2002.
-[12] T. Jebara, R. Kondor, and A. Howard, “Probability Product Kernels,” JMLR, vol. 5, pp. 819–844, 2004.
 # G. B. Huang et al., “Labeled Faces in the Wild…,” UMass Amherst, Tech. Rep. 07-49, 2007.
 # F. Schroff, D. Kalenichenko, and J. Philbin, “FaceNet…,” in Proc. IEEE CVPR, 2015.
 # J. Deng et al., “ArcFace…,” in Proc. IEEE CVPR, 2019.
-# [16] H. He and E. A. Garcia, “Learning from Imbalanced Data,” IEEE TKDE, vol. 21, no. 9, pp. 1263–1284, 2009.
+# H. He and E. A. Garcia, “Learning from Imbalanced Data,” IEEE TKDE, vol. 21, no. 9, pp. 1263–1284, 2009.
 # M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
 # P. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” in Proc. IJCAI, 1995.
 # S. Kaufman, S. Rosset, and C. Perlich, “Leakage in Data Mining: Formulation, Detection, and Avoidance,” in Proc. ACM KDD, 2012.
-[20] C. P. Robert and G. Casella, Monte Carlo Statistical Methods, 2nd ed. Springer, 2004.
-[21] R. D. Peng, “Reproducible Research in Computational Science,” Science, vol. 334, no. 6060, pp. 1226–1227, 2011.
-[22] S. Amershi et al., “Power to the People: The Role of Humans in Interactive Machine Learning,” AI Magazine, 2014.
+
 
 
 
