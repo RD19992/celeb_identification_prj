@@ -384,6 +384,9 @@ def print_confusion_binary(title: str, cm: Dict[str, int]):
 # Autenticação: threshold tuning + avaliação de pares
 # ============================================================
 
+#Referência para autenticação por pares
+# G. B. Huang et al., “Labeled Faces in the Wild…,” UMass Amherst, Tech. Rep. 07-49, 2007.
+
 def _sample_positive_pairs_per_class(y: np.ndarray, rng: np.random.Generator, per_class: int):
     y = np.asarray(y, dtype=np.int64)
     pairs = []
@@ -647,6 +650,8 @@ def auth_macro_auc_per_identity(
         "conf_median": float(np.median(auc_conf_list)),
     }
 
+# Referência para similaridade por dot/cosseno; avaliação em lote.
+# F. Schroff, D. Kalenichenko, and J. Philbin, “FaceNet…,” in Proc. IEEE CVPR, 2015.
 
 def _pair_dot_scores_batched(A: np.ndarray, ii: np.ndarray, jj: np.ndarray,
                             batch: int = 50000, label: str = "pairs") -> np.ndarray:
@@ -749,6 +754,9 @@ def _score_summary(scores: np.ndarray) -> Dict[str, float]:
         "std": float(np.std(scores)),
     }
 
+# Implementação das avaliações de autenticação de pares por similaridade/distância com threshold
+# F. Schroff, D. Kalenichenko, and J. Philbin, “FaceNet” in Proc. IEEE CVPR, 2015.
+# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006.
 
 def build_tuning_pairs(y: np.ndarray, rng: np.random.Generator,
                        pos_pairs_per_class: int, neg_pairs_total: int,
@@ -1093,6 +1101,10 @@ def eval_auth_pairs_sample(emb: np.ndarray, y: np.ndarray, thr: float, rng: np.r
 # ============================================================
 # Split / reconstrução de avaliação
 # ============================================================
+
+# Referências de separação de sets sem leakage
+# P. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” in Proc. IJCAI, 1995.
+# # S. Kaufman, S. Rosset, and C. Perlich, “Leakage in Data Mining: Formulation, Detection, and Avoidance,” in Proc. ACM KDD, 2012.
 
 def _train_test_split_with_meta(X: np.ndarray, y: np.ndarray,
                                 paths: Optional[np.ndarray], ids: Optional[np.ndarray],
