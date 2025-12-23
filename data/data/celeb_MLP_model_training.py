@@ -59,8 +59,8 @@ CONFIG = {
     "cosine_softmax_eps": 1e-8,
     "cosine_softmax_use_bias": False,
 
-    #Referência para dropout: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
-
+    # Usamos dropout para tentar reduzir overfit
+    # Referência para dropout: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
     # Configuração do dropout - para reduzir overfit
     "dropout_hidden_p": 0.10,
     # Grid de dropout (otimizado no CV)
@@ -122,6 +122,8 @@ CONFIG = {
     "momentum_beta": 0.90,
     "use_nesterov": False,
 
+
+    # Referência para LRate: P. Goyal et al., “Accurate, large minibatch SGD: Training ImageNet in 1 hour,” arXiv:1706.02677, 2017.
     # Schedule de taxa de aprendizado (warmup + teto + decaimento)
     "lr_base": 0.3,  # LR após warmup
     "lr_min": 1e-4,
@@ -129,6 +131,8 @@ CONFIG = {
     "lr_warmup_start": 0.10,  # LR inicial (no warmup)
     "lr_decay": 0.98,  # multiplicativo por época após warmup - vai reduzindo progressivamente aprendizado
 
+
+    # Referência: L. Bottou, “Stochastic gradient descent tricks,” in Neural Networks: Tricks of the Trade, Springer, 2012.
     # Guardas contra colapso numérico
     "nan_guard_enabled": True,
     "nan_guard_alpha_shrink": 0.5,  # se colapsar, reduz LR e restaura checkpoint
@@ -162,6 +166,8 @@ CONFIG = {
     "final_val_frac": 0.10,
     "final_val_seed": 2026,
 
+    # Padronização de saída do HOG
+    # Referência C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006. Capítulo 12 p. 567
     # padronização
     "eps_std": 1e-6,
 
@@ -323,6 +329,9 @@ def stable_softmax(Z: np.ndarray):
 # Ajuda a estabilizar em cenários com MUITAS classes (e.g., identificação/face),
 # pois reduz a dependência de norma e foca em ângulo (similaridade cosseno).
 
+# Referência: S. Wang, W. Liu, J. Cheng, and H. Lu, “NormFace: L2 hypersphere embedding for face verification,” in Proc. ACM MM, 2017.
+# Referência: J. Deng, J. Guo, N. Xue, and S. Zafeiriou, “ArcFace: Additive angular margin loss for deep face recognition,” in Proc. CVPR, 2019.
+
 def _row_norm_forward(A: np.ndarray, eps: float):
     # normaliza cada linha: A_hat[i] = A[i]/||A[i]||
     A = A.astype(np.float32, copy=False)
@@ -456,6 +465,10 @@ def codificar_rotulos(y: np.ndarray, classes: np.ndarray):
 # Inicialização He (ReLU) /Xavier (Tanh)
 # ============================================================
 
+# Conforme referências já citadas acima
+# Referência He: K. He, X. Zhang, S. Ren, and J. Sun, “Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification,” in Proc. ICCV, 2015.
+# Referência Xavier: X. Glorot and Y. Bengio, “Understanding the difficulty of training deep feedforward neural networks,” in Proc. AISTATS, 2010.
+
 def _std_he(fan_in: int) -> float:
     return float(np.sqrt(2.0 / max(fan_in, 1)))
 
@@ -492,6 +505,7 @@ def inicializar_pesos(d: int, H: int, K: int, act_hidden: str, rng: np.random.Ge
 # ============================================================
 # Dropout (invertido)
 # ============================================================
+# Referência para dropout: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
 
 def aplicar_dropout_invertido(A: np.ndarray, p_drop: float, rng: np.random.Generator):
     p = float(p_drop)
@@ -507,6 +521,8 @@ def aplicar_dropout_invertido(A: np.ndarray, p_drop: float, rng: np.random.Gener
 # ============================================================
 # LayerNorm (treinável) forward/backward
 # ============================================================
+# Referência para LayerNorm: J. L. Ba, J. R. Kiros, and G. E. Hinton, “Layer normalization,” arXiv:1607.06450, 2016.
+
 
 def layernorm_forward(Z: np.ndarray, gamma: np.ndarray, beta: np.ndarray, eps: float):
     """
@@ -547,6 +563,9 @@ def layernorm_backward(dout: np.ndarray, cache):
 # ============================================================
 # Forward / Loss / Backprop
 # ============================================================
+
+# Referência: Y. LeCun, L. Bottou, Y. Bengio, and P. Haffner, “Gradient-based learning applied to document recognition,” Proc. IEEE, vol. 86, no. 11, pp. 2278–2324, 1998.
+# Referência: I. Goodfellow, Y. Bengio, and A. Courville, Deep Learning. MIT Press, 2016.
 
 def mlp_forward(
         X: np.ndarray,
@@ -759,6 +778,7 @@ def norma_fro(A: np.ndarray) -> float:
 # ============================================================
 # Gradient clipping (global norm)
 # ============================================================
+# Referência: R. Pascanu, T. Mikolov, and Y. Bengio, “On the difficulty of training recurrent neural networks,” in Proc. ICML, 2013. (gradient clipping)
 
 def clip_grads_global_norm(grads: dict, clip: float, eps: float = 1e-12):
     norm2 = 0.0
@@ -778,6 +798,7 @@ def clip_grads_global_norm(grads: dict, clip: float, eps: float = 1e-12):
 # ============================================================
 # Max-Norm (opcional)
 # ============================================================
+#Referência: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
 
 def apply_maxnorm(W: np.ndarray, maxnorm: float):
     if maxnorm is None:
