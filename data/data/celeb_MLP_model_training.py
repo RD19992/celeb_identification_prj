@@ -85,6 +85,9 @@ CONFIG = {
     # Regularização / loss
     # -----------------
     # Label smoothing reduz colapso de confiança
+    # Referência: C. Szegedy, V. Vanhoucke, S. Ioffe, J. Shlens, and Z. Wojna, “Rethinking the Inception architecture for computer vision,” in Proc. CVPR, 2016. (label smoothing)
+    # Label Smoothing reforça a regularização para reduzir overfit. Faz isso deixandos os rótulos "soft" - em vez de zero e um é uma probabilidade próxima disso
+    # O parâmetro ajusta a distrbuição de probabilidade
     "label_smoothing": 0.05,  # 0.0 desliga
     # Grid de valores de L2 testados no CV
     "grid_l2": [0.0, 0.1, 0.3, 1.0],
