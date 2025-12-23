@@ -25,16 +25,24 @@ from sklearn.model_selection import train_test_split
 # CONFIG DO SCRIPT (ajuste aqui)
 # ============================================================
 
-# Ref: Fawcett (2006) — ROC/AUC como diagnóstico de classificadores.
-# Ref: Rumelhart, Hinton & Williams (1986) + Goodfellow et al. (2016) — forward pass (inferência) em MLP.
-# Ref: Schroff et al. (2015) — construção de pares positivos para verificação/threshold tuning.
-# Ref: Schroff et al. (2015) — similaridade por dot/cosseno; avaliação em lote.
-# Referências (contexto de verificação por embeddings):
-    # - Schroff et al., "FaceNet" (embeddings + cosine para verificação), 2015.
-    # - Deng et al., "ArcFace" / Wang et al., "CosFace" (margens em espaço angular), 2018.
-# Referências em formato completo
-    # - T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006
-    # - E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
+#Referências (em comum com avaliação para regressão logística)
+# C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006.
+# K. P. Murphy, Machine Learning: A Probabilistic Perspective. MIT Press, 2012.
+# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006.
+# C. J. van Rijsbergen, Information Retrieval, 2nd ed. Butterworth-Heinemann, 1979. (F-measure)
+# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC…,” Journal of Machine Learning Technologies, 2011.
+# B. Schölkopf and A. J. Smola, Learning with Kernels. MIT Press, 2002.
+# G. B. Huang et al., “Labeled Faces in the Wild…,” UMass Amherst, Tech. Rep. 07-49, 2007.
+# F. Schroff, D. Kalenichenko, and J. Philbin, “FaceNet…,” in Proc. IEEE CVPR, 2015.
+# J. Deng et al., “ArcFace…,” in Proc. IEEE CVPR, 2019.
+# H. He and E. A. Garcia, “Learning from Imbalanced Data,” IEEE TKDE, vol. 21, no. 9, pp. 1263–1284, 2009.
+# M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
+# P. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” in Proc. IJCAI, 1995.
+# S. Kaufman, S. Rosset, and C. Perlich, “Leakage in Data Mining: Formulation, Detection, and Avoidance,” in Proc. ACM KDD, 2012.
+
+#Referências (específicas para MLP)
+# E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
+
 
 
 SCRIPT_CONFIG = {
