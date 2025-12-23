@@ -51,11 +51,6 @@ from sklearn.model_selection import train_test_split
 # CONFIGURAÇÕES
 # ============================================================
 
-#Para definição das métricas de erro, usamos como referências:
-# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC” Journal of Machine Learning Technologies, 2011.
-# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006
-
-
 SCRIPT_CONFIG = {
     # nome do arquivo salvo pelo script de treino (na mesma pasta)
     "model_payload_file": "logreg_pm_model_and_classes.joblib",
@@ -270,6 +265,8 @@ def extract_embeddings_logits(X: np.ndarray, modelo: Dict[str, Any]) -> np.ndarr
 
 # Referências para métricas
 # M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
+# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC” Journal of Machine Learning Technologies, 2011.
+# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006
 
 def accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_true = np.asarray(y_true, dtype=np.int64).ravel()

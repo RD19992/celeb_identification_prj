@@ -9,22 +9,6 @@ Consome parâmetros de modelo treinado
 Multilayer Perceptron com 1 Hidden Layer
 """
 
-from __future__ import annotations
-
-import sys
-import math
-import time
-import joblib
-import numpy as np
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
-
-from sklearn.model_selection import train_test_split
-
-# ============================================================
-# CONFIG DO SCRIPT (ajuste aqui)
-# ============================================================
-
 #Referências (em comum com avaliação para regressão logística)
 # C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006.
 # K. P. Murphy, Machine Learning: A Probabilistic Perspective. MIT Press, 2012.
@@ -42,8 +26,26 @@ from sklearn.model_selection import train_test_split
 
 #Referências (específicas para MLP)
 # E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
+# Wang, Feng, et al. "Normface: L2 hypersphere embedding for face verification." Proceedings of the 25th ACM international conference on Multimedia. 2017.
+# Krizhevsky, Alex, and Geoff Hinton. "Convolutional deep belief networks on cifar-10." Unpublished manuscript 40.7 (2010): 1-9.
+# K. He, X. Zhang, S. Ren, and J. Sun, “Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification,” in Proc. ICCV, 2015.
+# J. L. Ba, J. R. Kiros, and G. E. Hinton, “Layer normalization,” arXiv:1607.06450, 2016.
 
+from __future__ import annotations
 
+import sys
+import math
+import time
+import joblib
+import numpy as np
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+from sklearn.model_selection import train_test_split
+
+# ============================================================
+# CONFIG DO SCRIPT (ajuste aqui)
+# ============================================================
 
 SCRIPT_CONFIG = {
     # nome do arquivo salvo pelo script de treino (na mesma pasta)
@@ -194,6 +196,14 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.n
 # MLP: Funções mínimas para inferência
 # ============================================================
 
+# Ref: Bishop (2006) + Goodfellow, Bengio & Courville (2016) — softmax e estabilidade numérica (log-sum-exp trick).
+# Ref: Wang et al. (2017, NormFace) + Deng et al. (2019, ArcFace) — normalização L2 e similaridade angular/cosseno.
+# Ref: Wang et al. (2017, NormFace) + Deng et al. (2019, ArcFace) — normalização em espaço angular.
+# Ref: Nair & Hinton (2010) — ReLU; He et al. (2015) — ReLU em redes profundas.
+# Ref: Ba, Kiros & Hinton (2016) — Layer Normalization.
+# Ref: Rumelhart, Hinton & Williams (1986) + Goodfellow et al. (2016) — forward pass (inferência) em MLP.
+# Ref: Schroff et al. (2015, FaceNet) — embeddings para verificação; uso de camada interna.
+
 def stable_softmax(Z: np.ndarray):
     Z = Z.astype(np.float32, copy=False)
     Zm = Z - Z.max(axis=1, keepdims=True)
@@ -331,6 +341,11 @@ def extract_embeddings(X: np.ndarray, modelo: Dict[str, Any], inference_params: 
 # ============================================================
 # Métricas / Confusões
 # ============================================================
+
+# Referências para métricas
+# M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
+# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC” Journal of Machine Learning Technologies, 2011.
+# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006
 
 def accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_true = np.asarray(y_true, dtype=np.int64).ravel()
