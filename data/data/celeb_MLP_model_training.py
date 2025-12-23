@@ -74,9 +74,9 @@ CONFIG = {
     "use_layernorm": True,
     "layernorm_eps": 1e-5,
 
-    # Ao fim usamos He. Estes são algoritmos para inicializarmos peso com valor não grande, não pequeno demais
-
-
+    # Ao fim usamos He, dado que a ativação foi ReLU. Estes são algoritmos para inicializarmos peso com valor não grande, não pequeno demais
+    # Referência He: K. He, X. Zhang, S. Ren, and J. Sun, “Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification,” in Proc. ICCV, 2015.
+    # Referência Xavier: X. Glorot and Y. Bengio, “Understanding the difficulty of training deep feedforward neural networks,” in Proc. AISTATS, 2010.
     # inicialização de pesos
     "use_he_xavier_init": True,  # ReLU->He, tanh->Xavier
     "w_init_scale": 0.01,  # fallback
