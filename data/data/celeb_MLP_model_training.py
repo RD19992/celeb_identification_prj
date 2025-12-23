@@ -20,6 +20,8 @@ from sklearn.model_selection import train_test_split, StratifiedKFold, Stratifie
 # CONFIGURAÇÃO DE PARÂMETROS DE EXECUÇÃO E MODELAGEM
 # ============================================================
 
+# Referência para CV e abordagem de treinamento: R. Kohavi, “A study of cross-validation and bootstrap for accuracy estimation and model selection,” in Proc. IJCAI, 1995.
+
 CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
@@ -57,15 +59,23 @@ CONFIG = {
     "cosine_softmax_eps": 1e-8,
     "cosine_softmax_use_bias": False,
 
+    #Referência para dropout: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
+
     # Configuração do dropout - para reduzir overfit
     "dropout_hidden_p": 0.10,
     # Grid de dropout (otimizado no CV)
     "grid_dropout": [0.05, 0.10, 0.15],
     # 0.0 desliga
 
+    # Referência para LayerNorm: J. L. Ba, J. R. Kiros, and G. E. Hinton, “Layer normalization,” arXiv:1607.06450, 2016.
+    # O que Layer Normalization faz, do paper: aplicar normalização nas ativações dos neurônios para melhorar estebilidade numérica
+    # Importante para nosso CV
     # LayerNorm treinável antes da ativação (ajuda estabilidade)
     "use_layernorm": True,
     "layernorm_eps": 1e-5,
+
+    # Ao fim usamos He. Estes são algoritmos para inicializarmos peso com valor não grande, não pequeno demais
+
 
     # inicialização de pesos
     "use_he_xavier_init": True,  # ReLU->He, tanh->Xavier
