@@ -94,7 +94,7 @@ CONFIG = {
 
     #Max-Norm: regularização complementar ao dropout - restringe norma da matriz de pesos a um limte (parâmetro abaixo) durante backprop
     #Referência: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
-    # Max-Norm (opcional; ajuda contra explosões e overfit)
+    # Max-Norm (ajuda contra explosões e overfit)
     "maxnorm_enabled": True,
     "maxnorm_W1": 3.0,  # None desliga
     "maxnorm_W2": 3.0,  # None desliga
@@ -109,10 +109,13 @@ CONFIG = {
     "batch_size_cv": 128,
     "batch_size_final": 128,
 
+    # Referência: C. M. Bishop, “Training with noise is equivalent to Tikhonov regularization,” Neural Computation, vol. 7, no. 1, pp. 108–116, 1995.
     # Gaussian noise (somente no treino para combater overfit)
     "gaussian_noise_std": 0.01,  # ex.: 0.01; 0.0 desliga
 
-    # batches quase-balanceados (gera uma permutação que intercalada classes)
+    # Balanceamento de classes para o CV
+    # Referência H. He and E. A. Garcia, “Learning from imbalanced data,” IEEE TKDE, vol. 21, no. 9, pp. 1263–1284, 2009.
+    # batches quase-balanceados (gera uma permutação que intercala classes)
     "use_almost_balanced_batches": True,
     # Momentum para taxa de aprendizado empacada
     "use_momentum": True,
