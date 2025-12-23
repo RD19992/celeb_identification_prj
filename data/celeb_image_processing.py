@@ -10,6 +10,13 @@ Faz extração de feaures pra Histogram of Gradients (HOG)
 Seleciona de forma estratificada 20% das classes
 """
 
+#Referências para HOG
+
+# N. Dalal and B. Triggs, “Histograms of Oriented Gradients for Human Detection,” in Proc. IEEE CVPR, 2005.
+# Z. Liu, P. Luo, X. Wang, and X. Tang, “Deep Learning Face Attributes in the Wild,” in Proc. IEEE ICCV, 2015. (CelebA)
+# S. van der Walt et al., “scikit-image: image processing in Python,” PeerJ, 2014. (implementação do HOG via skimage.feature.hog)
+# R. Kohavi, “A study of cross-validation and bootstrap for accuracy estimation and model selection,” IJCAI, 1995. (evaluation/sampling context)
+
 ##Importação de bibliotecas
 import os
 import numpy as np
