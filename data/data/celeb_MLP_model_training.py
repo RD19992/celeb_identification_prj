@@ -87,11 +87,13 @@ CONFIG = {
     # Label smoothing reduz colapso de confiança
     # Referência: C. Szegedy, V. Vanhoucke, S. Ioffe, J. Shlens, and Z. Wojna, “Rethinking the Inception architecture for computer vision,” in Proc. CVPR, 2016. (label smoothing)
     # Label Smoothing reforça a regularização para reduzir overfit. Faz isso deixandos os rótulos "soft" - em vez de zero e um é uma probabilidade próxima disso
-    # O parâmetro ajusta a distrbuição de probabilidade
+    # O parâmetro ajusta a distribuição de probabilidade
     "label_smoothing": 0.05,  # 0.0 desliga
     # Grid de valores de L2 testados no CV
     "grid_l2": [0.0, 0.1, 0.3, 1.0],
 
+    #Max-Norm: regularização complementar ao dropout - restringe norma da matriz de pesos a um limte (parâmetro abaixo) durante backprop
+    #Referência: N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov, “Dropout: A simple way to prevent neural networks from overfitting,” JMLR, vol. 15, pp. 1929–1958, 2014.
     # Max-Norm (opcional; ajuda contra explosões e overfit)
     "maxnorm_enabled": True,
     "maxnorm_W1": 3.0,  # None desliga
@@ -100,6 +102,7 @@ CONFIG = {
     # -----------------
     # Épocas para Treinamento
     # -----------------
+    # Referência incluindo batch em vez de ponto a ponto: L. Bottou, “Stochastic gradient descent tricks,” in Neural Networks: Tricks of the Trade, Springer, 2012.
     "epochs_cv": 10,
     "epochs_final": 120,
 
@@ -128,6 +131,8 @@ CONFIG = {
     "nan_guard_alpha_shrink": 0.5,  # se colapsar, reduz LR e restaura checkpoint
     "nan_guard_max_rollbacks": 5,
 
+    # Limitar norma de gradientes para evitar explosão
+    # Referência: R. Pascanu, T. Mikolov, and Y. Bengio, “On the difficulty of training recurrent neural networks,” in Proc. ICML, 2013. (gradient clipping)
     # Gradient clipping (global norm)
     "grad_clip_enabled": True,
     "grad_clip_norm": 5.0,
