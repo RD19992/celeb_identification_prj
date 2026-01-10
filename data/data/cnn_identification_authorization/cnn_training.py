@@ -1,28 +1,34 @@
-## -*- coding: utf-8 -*-
-""""
+# -*- coding: utf-8 -*-
+"""
 EACH_USP: SIN-5016 - Aprendizado de Máquina
 Laura Silva Pelicer
 Renan Rios Diniz
 
-Código para experimentação e treinamento de CNN
+Treinamento de CNN (ResNet "explicit") com K-Fold CV (sem sklearn).
+
+Arquivos gerados (por execução), dentro de:
+  <DATASET_DIR>/runs/<YYYYMMDD_HHMMSS>/
+
+- run_errors.csv            (métricas por fold/época)
+- summary.json              (agregados e melhores erros por fold)
+- hyperparameters.json      (CONFIG usado na execução)
+- label2idx.json            (mapeamento label_original -> y_reindexado)
+- [opcional] models/*.keras (salvo apenas se SAVE_MODEL=True)
+
+Obs.: SAVE_MODEL começa DESABILITADO por padrão.
 """
 
-# -*- coding: utf-8 -*-
-"""
-Preparação do dataset (CNN) a partir do output do script de ingestão RGB.
-
-Lê:  data/cnn_identification_authorization/celeba_rgb_256x256/manifest.csv
-Usa: data/cnn_identification_authorization/celeba_rgb_256x256/images/*.jpg
-
-Gera:
-- train.csv
-- test.csv
-no mesmo diretório do manifest.
-"""
+from __future__ import annotations
 
 from pathlib import Path
+import csv
+import datetime as _dt
+import json
 import math
 import random
+import time
+from typing import Dict, Tuple, List, Any
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -32,16 +38,14 @@ from tensorflow.keras import layers, regularizers, Model
 # =========================
 # CONFIGURAÇÕES
 # =========================
-# Ajustar conforme experimento
-CONFIG = {
-    # Data produced by  ingestion script
+CONFIG: Dict[str, Any] = {
+    # Data produced by ingestion script
     "DATASET_DIR": Path(__file__).resolve().parent / "celeba_rgb_256x256",
     "MANIFEST_NAME": "manifest.csv",
     "ONLY_OK": True,                 # use ok==True if column exists
 
     # Class filtering
     "TOP_CLASS_FRACTION": 0.20,       # top 20% most frequent classes
-    "TEST_FRACTION": 0.20,  # 20% teste
     "KFOLDS": 5,
     "SEED": 42,
 
@@ -74,143 +78,50 @@ CONFIG = {
     "PREFETCH": True,
     "DEVICE": "/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0",
 
-    # (Opcional) remover classes muito pequenas antes de split
-    "MIN_IMAGES_PER_CLASS": 2,
+    # Outputs
+    "RUNS_DIRNAME": "runs",
+    "SAVE_MODEL": False,              # <-- começa desabilitado
 }
 
 
 # =========================
-# FUNÇÕES BÁSICAS
+# UTIL
 # =========================
-def load_manifest(dataset_dir: Path, only_ok: bool) -> pd.DataFrame:
-    manifest_path = dataset_dir / "manifest.csv"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"manifest.csv não encontrado em: {manifest_path}")
-
-    df = pd.read_csv(manifest_path)
-
-    required = {"image_name", "label", "dst"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"manifest.csv sem colunas necessárias: {missing}")
-
-    if only_ok and "ok" in df.columns:
-        df = df[df["ok"] == True].copy()
-
-    # garante tipos
-    df["label"] = df["label"].astype(int)
-    df["image_name"] = df["image_name"].astype(str)
-    df["dst"] = df["dst"].astype(str)
-
-    # confere existência dos arquivos (barato e evita dor depois)
-    df["dst_exists"] = df["dst"].apply(lambda p: Path(p).exists())
-    df = df[df["dst_exists"] == True].drop(columns=["dst_exists"]).reset_index(drop=True)
-
-    if df.empty:
-        raise RuntimeError("Após filtros, não sobrou nenhuma imagem válida.")
-
-    return df
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
 
 
-def keep_top_classes(df: pd.DataFrame, top_fraction: float) -> pd.DataFrame:
-    if not (0 < top_fraction <= 1.0):
-        raise ValueError("TOP_CLASS_FRACTION deve estar em (0, 1].")
-
-    if top_fraction >= 1.0:
-        return df
-
-    counts = df["label"].value_counts()
-    n_classes = len(counts)
-    k = max(1, int(math.ceil(top_fraction * n_classes)))
-    top_labels = set(counts.nlargest(k).index.tolist())
-
-    df2 = df[df["label"].isin(top_labels)].reset_index(drop=True)
-    print(f"[INFO] Mantendo top classes: {k}/{n_classes} ({100*k/n_classes:.1f}%)")
-    print(f"[INFO] Imagens após filtro top-classes: {len(df2)}/{len(df)} ({100*len(df2)/len(df):.1f}%)")
-    return df2
+def now_stamp() -> str:
+    # YYYYMMDD_HHMMSS
+    return _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def drop_small_classes(df: pd.DataFrame, min_per_class: int) -> pd.DataFrame:
-    if min_per_class <= 1:
-        return df
-
-    counts = df["label"].value_counts()
-    keep = set(counts[counts >= min_per_class].index.tolist())
-    df2 = df[df["label"].isin(keep)].reset_index(drop=True)
-
-    removed_classes = (counts < min_per_class).sum()
-    if removed_classes > 0:
-        print(f"[INFO] Removidas {removed_classes} classes com < {min_per_class} imagens.")
-        print(f"[INFO] Imagens após filtro min_per_class: {len(df2)}/{len(df)} ({100*len(df2)/len(df):.1f}%)")
-
-    if df2.empty:
-        raise RuntimeError("Após remover classes pequenas, dataset ficou vazio.")
-    return df2
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
 
 
-def stratified_train_test_split(df: pd.DataFrame, test_fraction: float, seed: int):
-    """
-    Split estratificado por classe sem sklearn.
-    """
-    if not (0 < test_fraction < 1.0):
-        raise ValueError("TEST_FRACTION deve estar em (0,1).")
+def save_json(obj: Any, path: Path) -> None:
+    def _default(x):
+        if isinstance(x, Path):
+            return str(x)
+        return str(x)
 
-    # embaralha com seed
-    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2, default=_default)
 
-    test_parts = []
-    train_parts = []
-
-    for label, grp in df.groupby("label", sort=False):
-        n = len(grp)
-        n_test = int(round(n * test_fraction))
-        # garante pelo menos 1 no treino e 1 no teste quando possível
-        if n >= 2:
-            n_test = max(1, min(n - 1, n_test))
-        else:
-            # n==1: força tudo no treino (ou você remove antes com MIN_IMAGES_PER_CLASS=2)
-            n_test = 0
-
-        test_parts.append(grp.iloc[:n_test])
-        train_parts.append(grp.iloc[n_test:])
-
-    test_df = pd.concat(test_parts, ignore_index=True)
-    train_df = pd.concat(train_parts, ignore_index=True)
-
-    # embaralha de novo só por estética/consistência
-    train_df = train_df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
-    test_df = test_df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
-
-    return train_df, test_df
-
-
-def save_splits(dataset_dir: Path, train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
-    train_path = dataset_dir / "train.csv"
-    test_path = dataset_dir / "test.csv"
-
-    cols = ["image_name", "label", "dst"]
-    train_df[cols].to_csv(train_path, index=False)
-    test_df[cols].to_csv(test_path, index=False)
-
-    print("[DONE] Splits salvos:")
-    print(" -", train_path)
-    print(" -", test_path)
-    print(f"[DONE] Train: {len(train_df)} | Test: {len(test_df)} | Total: {len(train_df)+len(test_df)}")
-
-    print("[INFO] #classes (train):", train_df["label"].nunique())
-    print("[INFO] #classes (test): ", test_df["label"].nunique())
 
 # =========================
-# FUNÇÕES BLOCO CNN RESNET
+# RESNET (EXPLICIT)
 # =========================
-
 def conv_bn_act(
     x,
     filters: int,
     k: int,
     stride: int,
     use_bn: bool,
-    activation: str,
+    activation: str | None,
     l2_weight: float,
     name: str
 ):
@@ -242,7 +153,6 @@ def basic_res_block(
     Downsample skip with 1x1 when stride!=1 or channels change.
     """
     shortcut = x
-
     in_ch = x.shape[-1]
     out_ch = filters
 
@@ -271,7 +181,6 @@ def basic_res_block(
         if use_bn:
             shortcut = layers.BatchNormalization(name=f"{name}_skip_bn")(shortcut)
 
-    # merge + activation
     out = layers.Add(name=f"{name}_add")([shortcut, y])
     out = layers.Activation(activation, name=f"{name}_out_{activation}")(out)
     return out
@@ -288,7 +197,6 @@ def make_stage(
     l2_weight: float,
     name: str
 ):
-    # first block can downsample
     x = basic_res_block(
         x, filters=filters, stride=first_stride,
         use_bn=use_bn, activation=activation,
@@ -305,12 +213,15 @@ def make_stage(
     return x
 
 
-def build_min_resnet(cfg, num_classes: int) -> Model:
+def build_min_resnet(cfg: Dict[str, Any], num_classes: int) -> Model:
     """
     Minimal ResNet (explicit):
-    stem -> stages -> GAP -> Dense
+      stem -> stages -> GAP -> Dense(logits)
     """
-    inp = layers.Input(shape=(cfg["IMG_SIZE"], cfg["IMG_SIZE"], cfg["IN_CHANNELS"]), name="input")
+    inp = layers.Input(
+        shape=(cfg["IMG_SIZE"], cfg["IMG_SIZE"], cfg["IN_CHANNELS"]),
+        name="input"
+    )
 
     # Stem (simple 3x3)
     x = conv_bn_act(
@@ -340,20 +251,15 @@ def build_min_resnet(cfg, num_classes: int) -> Model:
 
     return Model(inputs=inp, outputs=logits, name="ResNetSmallExplicit")
 
+
 # =========================
 # DATA LOADING + STRATIFIED KFOLD (NO SKLEARN)
 # =========================
-import math
-import random
-import numpy as np
-import pandas as pd
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-
-def load_and_filter_manifest(cfg):
+def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[int, int]]:
+    """
+    Lê manifest, filtra top classes por frequência, e remapeia labels para y em [0..C-1].
+    Também remove classes que não tenham >= KFOLDS exemplos (necessário para CV estratificado).
+    """
     manifest_path = cfg["DATASET_DIR"] / cfg["MANIFEST_NAME"]
     if not manifest_path.exists():
         raise FileNotFoundError(f"Manifest not found: {manifest_path}")
@@ -373,6 +279,9 @@ def load_and_filter_manifest(cfg):
     df = df[df["dst"].apply(lambda p: Path(p).exists())].copy()
     df.reset_index(drop=True, inplace=True)
 
+    if df.empty:
+        raise RuntimeError("No valid images after filtering by file existence / ok flag.")
+
     # top classes by frequency
     top_fraction = cfg["TOP_CLASS_FRACTION"]
     if not (0 < top_fraction <= 1.0):
@@ -391,7 +300,7 @@ def load_and_filter_manifest(cfg):
     df["y"] = df["label"].map(label2idx).astype(int)
 
     # ensure each class has enough samples for k-fold
-    kfolds = cfg["KFOLDS"]
+    kfolds = int(cfg["KFOLDS"])
     counts = df["y"].value_counts()
     keep_y = set(counts[counts >= kfolds].index.tolist())
     df = df[df["y"].isin(keep_y)].copy()
@@ -404,7 +313,7 @@ def load_and_filter_manifest(cfg):
     return df, label2idx
 
 
-def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int):
+def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     For each class y: shuffle indices, split into k chunks.
     Fold i uses chunk i from every class as validation.
@@ -426,6 +335,7 @@ def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int):
         folds.append((train_idx, val_idx))
     return folds
 
+
 # =========================
 # TF.DATA PIPELINE (EXPLICIT)
 # =========================
@@ -435,7 +345,8 @@ def _normalize(img, mean, std):
     img = tf.cast(img, tf.float32) / 255.0
     return (img - mean) / std
 
-def _augment(img, cfg):
+
+def _augment(img, cfg: Dict[str, Any]):
     if cfg["AUG_HFLIP"]:
         img = tf.image.random_flip_left_right(img)
     pad = int(cfg["AUG_PAD"])
@@ -444,7 +355,8 @@ def _augment(img, cfg):
         img = tf.image.random_crop(img, size=[cfg["IMG_SIZE"], cfg["IMG_SIZE"], cfg["IN_CHANNELS"]])
     return img
 
-def make_tf_dataset(df: pd.DataFrame, cfg, training: bool):
+
+def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
     paths = df["dst"].to_numpy()
     labels = df["y"].to_numpy().astype(np.int32)
 
@@ -471,10 +383,11 @@ def make_tf_dataset(df: pd.DataFrame, cfg, training: bool):
 
     return ds
 
+
 # =========================
 # TRAIN / EVAL (EXPLICIT)
 # =========================
-def train_one_epoch(model, ds, optimizer, loss_fn, cfg):
+def train_one_epoch(model: Model, ds, optimizer, loss_fn):
     train_loss = tf.keras.metrics.Mean()
     train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
 
@@ -497,7 +410,7 @@ def train_one_epoch(model, ds, optimizer, loss_fn, cfg):
     return float(train_loss.result().numpy()), acc, err
 
 
-def evaluate(model, ds, loss_fn):
+def evaluate(model: Model, ds, loss_fn):
     val_loss = tf.keras.metrics.Mean()
     val_acc = tf.keras.metrics.SparseCategoricalAccuracy()
 
@@ -514,70 +427,147 @@ def evaluate(model, ds, loss_fn):
     err = 1.0 - acc
     return float(val_loss.result().numpy()), acc, err
 
+
 # =========================
-# TRAIN / EVAL (EXPLICIT)
+# K-FOLD CV RUNNER
 # =========================
-def train_one_epoch(model, ds, optimizer, loss_fn, cfg):
-    train_loss = tf.keras.metrics.Mean()
-    train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
+    """
+    Executa K-Fold CV e grava arquivos de log.
+    Retorna: (cv_mean_best_val_err, run_dir)
+    """
+    set_seed(int(cfg["SEED"]))
 
-    for x, y in ds:
-        with tf.GradientTape() as tape:
-            logits = model(x, training=True)
-            loss = loss_fn(y, logits)
-            # add L2 losses (from kernel_regularizer)
-            if model.losses:
-                loss = loss + tf.add_n(model.losses)
+    df, label2idx = load_and_filter_manifest(cfg)
+    k = int(cfg["KFOLDS"])
+    folds = stratified_kfold_indices(df, k=k, seed=int(cfg["SEED"]))
+    num_classes = int(df["y"].nunique())
 
-        grads = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    # output dir
+    stamp = now_stamp()
+    run_dir = cfg["DATASET_DIR"] / cfg["RUNS_DIRNAME"] / stamp
+    ensure_dir(run_dir)
 
-        train_loss.update_state(loss)
-        train_acc.update_state(y, logits)
+    # save hyperparams + label map
+    save_json(cfg, run_dir / "hyperparameters.json")
+    save_json({str(k): int(v) for k, v in label2idx.items()}, run_dir / "label2idx.json")
 
-    acc = float(train_acc.result().numpy())
-    err = 1.0 - acc
-    return float(train_loss.result().numpy()), acc, err
+    # CSV metrics file
+    errors_csv = run_dir / "run_errors.csv"
+    with errors_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "fold", "epoch",
+            "train_loss", "train_acc", "train_err",
+            "val_loss", "val_acc", "val_err",
+            "epoch_seconds"
+        ])
 
+        fold_summaries = []
+        best_val_errs = []
 
-def evaluate(model, ds, loss_fn):
-    val_loss = tf.keras.metrics.Mean()
-    val_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+        for fold_i, (train_idx, val_idx) in enumerate(folds, start=1):
+            tf.keras.backend.clear_session()
+            # variar seed por fold, mantendo reprodutível
+            set_seed(int(cfg["SEED"]) + 1000 * fold_i)
 
-    for x, y in ds:
-        logits = model(x, training=False)
-        loss = loss_fn(y, logits)
-        if model.losses:
-            loss = loss + tf.add_n(model.losses)
+            train_df = df.iloc[train_idx].reset_index(drop=True)
+            val_df = df.iloc[val_idx].reset_index(drop=True)
 
-        val_loss.update_state(loss)
-        val_acc.update_state(y, logits)
+            train_ds = make_tf_dataset(train_df, cfg, training=True)
+            val_ds = make_tf_dataset(val_df, cfg, training=False)
 
-    acc = float(val_acc.result().numpy())
-    err = 1.0 - acc
-    return float(val_loss.result().numpy()), acc, err
+            with tf.device(cfg["DEVICE"]):
+                model = build_min_resnet(cfg, num_classes=num_classes)
+
+            optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg["LR"]))
+            loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+
+            best_val_err = float("inf")
+            best_epoch = -1
+            best_weights = None
+
+            print(f"\n[INFO] Fold {fold_i}/{k} | train={len(train_df)} val={len(val_df)} | classes={num_classes}")
+
+            for epoch in range(1, int(cfg["EPOCHS"]) + 1):
+                t0 = time.time()
+
+                tr_loss, tr_acc, tr_err = train_one_epoch(model, train_ds, optimizer, loss_fn)
+                va_loss, va_acc, va_err = evaluate(model, val_ds, loss_fn)
+
+                dt = time.time() - t0
+                w.writerow([
+                    fold_i, epoch,
+                    f"{tr_loss:.6f}", f"{tr_acc:.6f}", f"{tr_err:.6f}",
+                    f"{va_loss:.6f}", f"{va_acc:.6f}", f"{va_err:.6f}",
+                    f"{dt:.3f}"
+                ])
+                f.flush()
+
+                print(
+                    f"[Fold {fold_i}][Epoch {epoch}/{cfg['EPOCHS']}] "
+                    f"train_loss={tr_loss:.4f} train_err={tr_err:.4f} | "
+                    f"val_loss={va_loss:.4f} val_err={va_err:.4f} | {dt:.1f}s"
+                )
+
+                if va_err < best_val_err:
+                    best_val_err = float(va_err)
+                    best_epoch = int(epoch)
+                    best_weights = model.get_weights()
+
+            # restore best weights for this fold (best val_err)
+            if best_weights is not None:
+                model.set_weights(best_weights)
+
+            best_val_errs.append(best_val_err)
+            fold_summaries.append({
+                "fold": fold_i,
+                "best_epoch": best_epoch,
+                "best_val_err": best_val_err,
+            })
+
+            # optional model saving
+            if bool(cfg.get("SAVE_MODEL", False)):
+                models_dir = run_dir / "models"
+                ensure_dir(models_dir)
+                save_path = models_dir / f"model_fold{fold_i}_best.keras"
+                model.save(save_path)
+                print(f"[SAVED] {save_path}")
+
+    # summary
+    mean_err = float(np.mean(best_val_errs))
+    std_err = float(np.std(best_val_errs, ddof=1)) if len(best_val_errs) > 1 else 0.0
+
+    summary = {
+        "kfolds": k,
+        "num_images": int(len(df)),
+        "num_classes": int(num_classes),
+        "best_val_errs": best_val_errs,
+        "cv_mean_best_val_err": mean_err,
+        "cv_std_best_val_err": std_err,
+        "folds": fold_summaries,
+        "run_dir": str(run_dir),
+        "device": cfg["DEVICE"],
+        "timestamp": stamp,
+    }
+    save_json(summary, run_dir / "summary.json")
+
+    print("\n[DONE] CV finished.")
+    print(f"[RESULT] mean(best_val_err)={mean_err:.6f} | std={std_err:.6f}")
+    print(f"[FILES] {run_dir}")
+    return mean_err, run_dir
 
 
 # =========================
 # MAIN
 # =========================
-def main():
-    dataset_dir: Path = CONFIG["DATASET_DIR"]
-    only_ok: bool = CONFIG["ONLY_OK"]
-    top_fraction: float = CONFIG["TOP_CLASS_FRACTION"]
-    test_fraction: float = CONFIG["TEST_FRACTION"]
-    seed: int = CONFIG["SEED"]
-    min_per_class: int = CONFIG["MIN_IMAGES_PER_CLASS"]
-
-    print("[INFO] Dataset dir:", dataset_dir)
-    df = load_manifest(dataset_dir, only_ok=only_ok)
-    print("[INFO] Manifest carregado:", df.shape)
-
-    df = keep_top_classes(df, top_fraction=top_fraction)
-    df = drop_small_classes(df, min_per_class=min_per_class)
-
-    train_df, test_df = stratified_train_test_split(df, test_fraction=test_fraction, seed=seed)
-    save_splits(dataset_dir, train_df, test_df)
+def main() -> float:
+    """
+    Treina ResNet 'explicit' com K-Fold CV.
+    Retorna o erro médio (val_err) dos melhores epochs por fold.
+    """
+    mean_err, _run_dir = run_kfold_cv(CONFIG)
+    return mean_err
 
 
 if __name__ == "__main__":
