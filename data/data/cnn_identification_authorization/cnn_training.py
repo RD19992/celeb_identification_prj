@@ -80,7 +80,7 @@ CONFIG = {
 
 
 # =========================
-# FUNÇÕES
+# FUNÇÕES BÁSICAS
 # =========================
 def load_manifest(dataset_dir: Path, only_ok: bool) -> pd.DataFrame:
     manifest_path = dataset_dir / "manifest.csv"
@@ -200,6 +200,362 @@ def save_splits(dataset_dir: Path, train_df: pd.DataFrame, test_df: pd.DataFrame
     print("[INFO] #classes (train):", train_df["label"].nunique())
     print("[INFO] #classes (test): ", test_df["label"].nunique())
 
+# =========================
+# FUNÇÕES BLOCO CNN RESNET
+# =========================
+
+def conv_bn_act(
+    x,
+    filters: int,
+    k: int,
+    stride: int,
+    use_bn: bool,
+    activation: str,
+    l2_weight: float,
+    name: str
+):
+    x = layers.Conv2D(
+        filters, k, strides=stride, padding="same", use_bias=not use_bn,
+        kernel_regularizer=regularizers.l2(l2_weight),
+        name=f"{name}_conv{k}x{k}"
+    )(x)
+    if use_bn:
+        x = layers.BatchNormalization(name=f"{name}_bn")(x)
+    if activation is not None:
+        x = layers.Activation(activation, name=f"{name}_{activation}")(x)
+    return x
+
+
+def basic_res_block(
+    x,
+    filters: int,
+    stride: int,
+    use_bn: bool,
+    activation: str,
+    dropout_p: float,
+    l2_weight: float,
+    name: str
+):
+    """
+    BasicBlock:
+      (3x3 -> BN -> Act) -> (3x3 -> BN) + skip -> Act
+    Downsample skip with 1x1 when stride!=1 or channels change.
+    """
+    shortcut = x
+
+    in_ch = x.shape[-1]
+    out_ch = filters
+
+    # main path
+    y = conv_bn_act(
+        x, filters=filters, k=3, stride=stride,
+        use_bn=use_bn, activation=activation, l2_weight=l2_weight,
+        name=f"{name}_c1"
+    )
+    y = conv_bn_act(
+        y, filters=filters, k=3, stride=1,
+        use_bn=use_bn, activation=None, l2_weight=l2_weight,
+        name=f"{name}_c2"
+    )
+
+    if dropout_p and dropout_p > 0:
+        y = layers.SpatialDropout2D(dropout_p, name=f"{name}_drop")(y)
+
+    # skip path adjustment if needed
+    if stride != 1 or (in_ch is not None and int(in_ch) != int(out_ch)):
+        shortcut = layers.Conv2D(
+            out_ch, 1, strides=stride, padding="same", use_bias=not use_bn,
+            kernel_regularizer=regularizers.l2(l2_weight),
+            name=f"{name}_skip_conv1x1"
+        )(shortcut)
+        if use_bn:
+            shortcut = layers.BatchNormalization(name=f"{name}_skip_bn")(shortcut)
+
+    # merge + activation
+    out = layers.Add(name=f"{name}_add")([shortcut, y])
+    out = layers.Activation(activation, name=f"{name}_out_{activation}")(out)
+    return out
+
+
+def make_stage(
+    x,
+    filters: int,
+    n_blocks: int,
+    first_stride: int,
+    use_bn: bool,
+    activation: str,
+    dropout_p: float,
+    l2_weight: float,
+    name: str
+):
+    # first block can downsample
+    x = basic_res_block(
+        x, filters=filters, stride=first_stride,
+        use_bn=use_bn, activation=activation,
+        dropout_p=dropout_p, l2_weight=l2_weight,
+        name=f"{name}_b1"
+    )
+    for i in range(2, n_blocks + 1):
+        x = basic_res_block(
+            x, filters=filters, stride=1,
+            use_bn=use_bn, activation=activation,
+            dropout_p=dropout_p, l2_weight=l2_weight,
+            name=f"{name}_b{i}"
+        )
+    return x
+
+
+def build_min_resnet(cfg, num_classes: int) -> Model:
+    """
+    Minimal ResNet (explicit):
+    stem -> stages -> GAP -> Dense
+    """
+    inp = layers.Input(shape=(cfg["IMG_SIZE"], cfg["IMG_SIZE"], cfg["IN_CHANNELS"]), name="input")
+
+    # Stem (simple 3x3)
+    x = conv_bn_act(
+        inp, filters=cfg["RES_CHANNELS"][0], k=3, stride=1,
+        use_bn=cfg["USE_BN"], activation=cfg["ACTIVATION"],
+        l2_weight=cfg["L2_WEIGHT"], name="stem"
+    )
+
+    # Stages
+    layers_per_stage = cfg["RES_LAYERS"]
+    chs = cfg["RES_CHANNELS"]
+    for s, (n_blocks, filters) in enumerate(zip(layers_per_stage, chs), start=1):
+        stride = 1 if s == 1 else 2
+        x = make_stage(
+            x, filters=filters, n_blocks=n_blocks, first_stride=stride,
+            use_bn=cfg["USE_BN"], activation=cfg["ACTIVATION"],
+            dropout_p=cfg["BLOCK_DROPOUT"], l2_weight=cfg["L2_WEIGHT"],
+            name=f"stage{s}"
+        )
+
+    x = layers.GlobalAveragePooling2D(name="gap")(x)
+    logits = layers.Dense(
+        num_classes,
+        kernel_regularizer=regularizers.l2(cfg["L2_WEIGHT"]),
+        name="logits"
+    )(x)
+
+    return Model(inputs=inp, outputs=logits, name="ResNetSmallExplicit")
+
+# =========================
+# DATA LOADING + STRATIFIED KFOLD (NO SKLEARN)
+# =========================
+import math
+import random
+import numpy as np
+import pandas as pd
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+def load_and_filter_manifest(cfg):
+    manifest_path = cfg["DATASET_DIR"] / cfg["MANIFEST_NAME"]
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    df = pd.read_csv(manifest_path)
+    need = {"dst", "label"}
+    if not need.issubset(set(df.columns)):
+        raise ValueError(f"manifest must contain columns {need}, got {df.columns.tolist()}")
+
+    if cfg["ONLY_OK"] and "ok" in df.columns:
+        df = df[df["ok"] == True].copy()
+
+    df["dst"] = df["dst"].astype(str)
+    df["label"] = df["label"].astype(int)
+
+    # keep only existing files
+    df = df[df["dst"].apply(lambda p: Path(p).exists())].copy()
+    df.reset_index(drop=True, inplace=True)
+
+    # top classes by frequency
+    top_fraction = cfg["TOP_CLASS_FRACTION"]
+    if not (0 < top_fraction <= 1.0):
+        raise ValueError("TOP_CLASS_FRACTION must be in (0,1].")
+
+    if top_fraction < 1.0:
+        counts = df["label"].value_counts()
+        k = max(1, int(math.ceil(top_fraction * len(counts))))
+        keep_labels = set(counts.nlargest(k).index.tolist())
+        df = df[df["label"].isin(keep_labels)].copy()
+        df.reset_index(drop=True, inplace=True)
+
+    # remap labels to [0..C-1]
+    uniq = sorted(df["label"].unique().tolist())
+    label2idx = {lab: i for i, lab in enumerate(uniq)}
+    df["y"] = df["label"].map(label2idx).astype(int)
+
+    # ensure each class has enough samples for k-fold
+    kfolds = cfg["KFOLDS"]
+    counts = df["y"].value_counts()
+    keep_y = set(counts[counts >= kfolds].index.tolist())
+    df = df[df["y"].isin(keep_y)].copy()
+    df.reset_index(drop=True, inplace=True)
+
+    if df.empty:
+        raise RuntimeError("Dataset empty after class filtering for k-fold.")
+
+    print(f"[INFO] images={len(df)} classes={df['y'].nunique()}")
+    return df, label2idx
+
+
+def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int):
+    """
+    For each class y: shuffle indices, split into k chunks.
+    Fold i uses chunk i from every class as validation.
+    """
+    per_y = {}
+    for y, grp in df.groupby("y", sort=False):
+        idx = grp.index.to_numpy()
+        rng = np.random.default_rng(seed + int(y))
+        rng.shuffle(idx)
+        per_y[int(y)] = np.array_split(idx, k)
+
+    all_idx = set(df.index.tolist())
+    folds = []
+    for i in range(k):
+        val_idx = np.concatenate([per_y[y][i] for y in per_y], axis=0)
+        val_set = set(val_idx.tolist())
+        train_idx = np.array(sorted(list(all_idx - val_set)), dtype=np.int64)
+        val_idx = np.array(sorted(list(val_set)), dtype=np.int64)
+        folds.append((train_idx, val_idx))
+    return folds
+
+# =========================
+# TF.DATA PIPELINE (EXPLICIT)
+# =========================
+def _normalize(img, mean, std):
+    mean = tf.constant(mean, dtype=tf.float32)
+    std = tf.constant(std, dtype=tf.float32)
+    img = tf.cast(img, tf.float32) / 255.0
+    return (img - mean) / std
+
+def _augment(img, cfg):
+    if cfg["AUG_HFLIP"]:
+        img = tf.image.random_flip_left_right(img)
+    pad = int(cfg["AUG_PAD"])
+    if pad > 0:
+        img = tf.pad(img, [[pad, pad], [pad, pad], [0, 0]], mode="REFLECT")
+        img = tf.image.random_crop(img, size=[cfg["IMG_SIZE"], cfg["IMG_SIZE"], cfg["IN_CHANNELS"]])
+    return img
+
+def make_tf_dataset(df: pd.DataFrame, cfg, training: bool):
+    paths = df["dst"].to_numpy()
+    labels = df["y"].to_numpy().astype(np.int32)
+
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+
+    def _load(path, y):
+        raw = tf.io.read_file(path)
+        img = tf.image.decode_jpeg(raw, channels=cfg["IN_CHANNELS"])
+        img = tf.image.resize(img, [cfg["IMG_SIZE"], cfg["IMG_SIZE"]], method="bilinear")
+        img = tf.cast(img, tf.uint8)  # keep deterministic dtype before aug
+        if training:
+            img = _augment(img, cfg)
+        img = _normalize(img, cfg["NORM_MEAN"], cfg["NORM_STD"])
+        return img, y
+
+    if training:
+        ds = ds.shuffle(buffer_size=min(len(df), 20000), seed=cfg["SEED"], reshuffle_each_iteration=True)
+
+    ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(cfg["BATCH_SIZE"], drop_remainder=training)
+
+    if cfg["PREFETCH"]:
+        ds = ds.prefetch(tf.data.AUTOTUNE)
+
+    return ds
+
+# =========================
+# TRAIN / EVAL (EXPLICIT)
+# =========================
+def train_one_epoch(model, ds, optimizer, loss_fn, cfg):
+    train_loss = tf.keras.metrics.Mean()
+    train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+
+    for x, y in ds:
+        with tf.GradientTape() as tape:
+            logits = model(x, training=True)
+            loss = loss_fn(y, logits)
+            # add L2 losses (from kernel_regularizer)
+            if model.losses:
+                loss = loss + tf.add_n(model.losses)
+
+        grads = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+        train_loss.update_state(loss)
+        train_acc.update_state(y, logits)
+
+    acc = float(train_acc.result().numpy())
+    err = 1.0 - acc
+    return float(train_loss.result().numpy()), acc, err
+
+
+def evaluate(model, ds, loss_fn):
+    val_loss = tf.keras.metrics.Mean()
+    val_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+
+    for x, y in ds:
+        logits = model(x, training=False)
+        loss = loss_fn(y, logits)
+        if model.losses:
+            loss = loss + tf.add_n(model.losses)
+
+        val_loss.update_state(loss)
+        val_acc.update_state(y, logits)
+
+    acc = float(val_acc.result().numpy())
+    err = 1.0 - acc
+    return float(val_loss.result().numpy()), acc, err
+
+# =========================
+# TRAIN / EVAL (EXPLICIT)
+# =========================
+def train_one_epoch(model, ds, optimizer, loss_fn, cfg):
+    train_loss = tf.keras.metrics.Mean()
+    train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+
+    for x, y in ds:
+        with tf.GradientTape() as tape:
+            logits = model(x, training=True)
+            loss = loss_fn(y, logits)
+            # add L2 losses (from kernel_regularizer)
+            if model.losses:
+                loss = loss + tf.add_n(model.losses)
+
+        grads = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+        train_loss.update_state(loss)
+        train_acc.update_state(y, logits)
+
+    acc = float(train_acc.result().numpy())
+    err = 1.0 - acc
+    return float(train_loss.result().numpy()), acc, err
+
+
+def evaluate(model, ds, loss_fn):
+    val_loss = tf.keras.metrics.Mean()
+    val_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+
+    for x, y in ds:
+        logits = model(x, training=False)
+        loss = loss_fn(y, logits)
+        if model.losses:
+            loss = loss + tf.add_n(model.losses)
+
+        val_loss.update_state(loss)
+        val_acc.update_state(y, logits)
+
+    acc = float(val_acc.result().numpy())
+    err = 1.0 - acc
+    return float(val_loss.result().numpy()), acc, err
 
 
 # =========================
