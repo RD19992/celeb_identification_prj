@@ -41,6 +41,7 @@ CONFIG = {
 
     # Class filtering
     "TOP_CLASS_FRACTION": 0.20,       # top 20% most frequent classes
+    "TEST_FRACTION": 0.20,  # 20% teste
     "KFOLDS": 5,
     "SEED": 42,
 
@@ -72,6 +73,9 @@ CONFIG = {
     # Performance
     "PREFETCH": True,
     "DEVICE": "/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0",
+
+    # (Opcional) remover classes muito pequenas antes de split
+    "MIN_IMAGES_PER_CLASS": 2,
 }
 
 
@@ -206,7 +210,7 @@ def main():
     only_ok: bool = CONFIG["ONLY_OK"]
     top_fraction: float = CONFIG["TOP_CLASS_FRACTION"]
     test_fraction: float = CONFIG["TEST_FRACTION"]
-    seed: int = CONFIG["RANDOM_SEED"]
+    seed: int = CONFIG["SEED"]
     min_per_class: int = CONFIG["MIN_IMAGES_PER_CLASS"]
 
     print("[INFO] Dataset dir:", dataset_dir)
