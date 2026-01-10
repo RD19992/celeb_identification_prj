@@ -34,6 +34,21 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 
+# =========================
+# GPU TEST
+# =========================
+
+# Use só a primeira GPU DirectML (normalmente a discreta)
+gpus = tf.config.list_physical_devices("GPU")
+if gpus:
+    try:
+        tf.config.set_visible_devices(gpus[0], "GPU")
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+        print("[INFO] Using GPU:", gpus[0])
+    except Exception as e:
+        print("[WARN] Could not set GPU config:", e)
+else:
+    print("[INFO] No GPU found, using CPU.")
 
 # =========================
 # CONFIGURAÇÕES
@@ -45,8 +60,8 @@ CONFIG: Dict[str, Any] = {
     "ONLY_OK": True,                 # use ok==True if column exists
 
     # Class filtering
-    "TOP_CLASS_FRACTION": 0.20,       # top 20% most frequent classes
-    "KFOLDS": 5,
+    "TOP_CLASS_FRACTION": 0.01,       # top 1% most frequent classes
+    "KFOLDS": 3,
     "SEED": 42,
 
     # Input
@@ -566,6 +581,7 @@ def main() -> float:
     Treina ResNet 'explicit' com K-Fold CV.
     Retorna o erro médio (val_err) dos melhores epochs por fold.
     """
+    print("[INFO] Using device:", CONFIG["DEVICE"])
     mean_err, _run_dir = run_kfold_cv(CONFIG)
     return mean_err
 
