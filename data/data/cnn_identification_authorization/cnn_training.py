@@ -32,23 +32,46 @@ from tensorflow.keras import layers, regularizers, Model
 # =========================
 # CONFIGURAÇÕES
 # =========================
-# Ajuste aqui conforme seu experimento
+# Ajustar conforme experimento
 CONFIG = {
-    # Pasta do dataset gerado (RGB redimensionado)
+    # Data produced by  ingestion script
     "DATASET_DIR": Path(__file__).resolve().parent / "celeba_rgb_256x256",
+    "MANIFEST_NAME": "manifest.csv",
+    "ONLY_OK": True,                 # use ok==True if column exists
 
-    # Fração das classes mais frequentes a manter (ex.: 0.20 = top 20% classes)
-    "TOP_CLASS_FRACTION": 0.10,
+    # Class filtering
+    "TOP_CLASS_FRACTION": 0.20,       # top 20% most frequent classes
+    "KFOLDS": 5,
+    "SEED": 42,
 
-    # Split
-    "TEST_FRACTION": 0.20,    # 20% teste
-    "RANDOM_SEED": 42,
+    # Input
+    "IMG_SIZE": 256,
+    "IN_CHANNELS": 3,
+    "NORM_MEAN": (0.485, 0.456, 0.406),
+    "NORM_STD":  (0.229, 0.224, 0.225),
 
-    # Filtra imagens inválidas
-    "ONLY_OK": True,
+    # Augmentation (explicit, minimal)
+    "AUG_HFLIP": True,
+    "AUG_PAD": 4,                    # reflect-pad then random crop; 0 disables
 
-    # remover classes muito pequenas antes de split
-    "MIN_IMAGES_PER_CLASS": 2,
+    # Minimal ResNet (explicit)
+    "RES_LAYERS": [1, 1, 1],          # blocks per stage
+    "RES_CHANNELS": [64, 128, 256],   # width per stage
+    "USE_BN": True,
+    "ACTIVATION": "relu",
+    "BLOCK_DROPOUT": 0.0,
+
+    # Regularization
+    "L2_WEIGHT": 1e-4,                # kernel L2 for Conv/Dense
+
+    # Training
+    "BATCH_SIZE": 64,
+    "EPOCHS": 5,
+    "LR": 1e-3,
+
+    # Performance
+    "PREFETCH": True,
+    "DEVICE": "/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0",
 }
 
 
@@ -172,6 +195,7 @@ def save_splits(dataset_dir: Path, train_df: pd.DataFrame, test_df: pd.DataFrame
 
     print("[INFO] #classes (train):", train_df["label"].nunique())
     print("[INFO] #classes (test): ", test_df["label"].nunique())
+
 
 
 # =========================
