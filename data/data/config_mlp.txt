@@ -27,7 +27,7 @@ final_frac = 1.0
 final_min_por_classe = 1
 final_val_frac = 0.1
 final_val_seed = 2026
-frac_classes = 1.0
+frac_classes = 0.005
 gaussian_noise_std = 0.01
 grad_clip_enabled = True
 grad_clip_norm = 5.0
@@ -68,7 +68,7 @@ w_init_scale = 0.01
 
 === HIPERPARÂMETROS FINAIS (selecionados) ===
 dropout = 0.15
-l2 = 0.3
+l2 = 0.0
 
 === STATS DO TREINO FINAL (modelo['stats']) ===
 best_epoch = None
