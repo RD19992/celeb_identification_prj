@@ -65,6 +65,9 @@ from tensorflow.keras import mixed_precision
 # (Mantido como estava.)
 mixed_precision.set_global_policy("float32")
 
+# >>> Logar onde cada op é colocado (CPU/GPU)
+tf.debugging.set_log_device_placement(False)
+
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -80,7 +83,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes (mantido)
+    "TOP_CLASS_FRACTION": 0.002,       # top fração de classes mais frequentes (mantido)
     "KFOLDS": 2,
     "SEED": 42,
 
@@ -105,7 +108,7 @@ CONFIG: Dict[str, Any] = {
     "RES_CHANNELS": [32, 64, 128],    # largura (canais) por estágio
     "USE_BN": True,                  # BatchNorm (normalização em batch)
     "ACTIVATION": "relu",
-    "BLOCK_DROPOUT": 0.0,
+    "BLOCK_DROPOUT": 0.05,
 
     # --------------------------------------------------------
     # Regularização
@@ -116,7 +119,7 @@ CONFIG: Dict[str, Any] = {
     # Treino
     # --------------------------------------------------------
     "BATCH_SIZE": 16,
-    "EPOCHS": 10,
+    "EPOCHS": 50,
     "LR": 1e-3,
 
     # --------------------------------------------------------
@@ -710,7 +713,9 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
 
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
 
-    if training:
+    # Só faz sentido embaralhar se houver pelo menos 2 exemplos.
+    # Se len(df) for 0 ou 1, shuffle é inútil e pode explodir (buffer_size=0).
+    if training and len(df) >= 2:
         ds = ds.shuffle(
             buffer_size=min(len(df), 20000),
             seed=int(cfg["SEED"]),
