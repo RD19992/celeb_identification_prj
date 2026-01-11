@@ -485,13 +485,16 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
         raw = tf.io.read_file(path)
         img = tf.image.decode_jpeg(raw, channels=channels, dct_method=dct_method)
 
+        # >>> CORREÇÃO: normalize para float32 0..1 ANTES de resize/augment
+        img = tf.image.convert_image_dtype(img, tf.float32)  # agora está em [0,1]
+
         if assume_ingested:
-            # enforce static shape (helps XLA/kernel selection); will error if incorrect
+            # enforce static shape (helps kernel selection); will error if incorrect
             img = tf.ensure_shape(img, [img_size, img_size, channels])
         else:
+            # >>> CORREÇÃO: apenas 1 resize (estava duplicado)
             img = tf.image.resize(img, [img_size, img_size], method="bilinear")
-            img = tf.image.resize(img, [img_size, img_size], method="bilinear")
-            # NÃO faça cast pra uint8 aqui
+            img = tf.ensure_shape(img, [img_size, img_size, channels])
 
         if training:
             if bool(cfg.get("AUG_HFLIP", True)):
@@ -501,7 +504,6 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
                 img = tf.pad(img, [[pad, pad], [pad, pad], [0, 0]], mode="REFLECT")
                 img = tf.image.random_crop(img, size=[img_size, img_size, channels])
 
-        img = tf.image.convert_image_dtype(img, tf.float32)  # /255.0
         img = (img - mean) / std
         return img, y
 
