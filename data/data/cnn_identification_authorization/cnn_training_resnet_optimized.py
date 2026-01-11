@@ -136,16 +136,16 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # ResNet mínima (explícita)
     # --------------------------------------------------------
-    "RES_LAYERS": [1, 1, 1],          # blocks por estágio
-    "RES_CHANNELS": [32, 64, 128],    # largura (canais) por estágio
+    "RES_LAYERS": [1, 1, 2, 2],          # blocks por estágio
+    "RES_CHANNELS": [32, 64, 96, 128],    # largura (canais) por estágio
     "USE_BN": True,                  # BatchNorm (normalização em batch)
     "ACTIVATION": "relu",
-    "BLOCK_DROPOUT": 0.05,
+    "BLOCK_DROPOUT": 0.1,
 
     # --------------------------------------------------------
     # Regularização
     # --------------------------------------------------------
-    "L2_WEIGHT": 5e-5,                # L2 no kernel de Conv/Dense
+    "L2_WEIGHT": 1e-5,                # L2 no kernel de Conv/Dense
 
     # --------------------------------------------------------
     # Treino
@@ -160,14 +160,14 @@ CONFIG: Dict[str, Any] = {
     "EPOCHS_FINAL": 30,               # NOVO: max épocas do treino final (antes do teste final)
 
     # LR base (mantido), agora usado como "initial_lr" do schedule (se habilitado).
-    "LR": 5e-2,
+    "LR": 3e-4,
 
     # --------------------------------------------------------
     # NOVO: Early stopping
     # --------------------------------------------------------
     # Se quiser desligar, coloque 0.
     "EARLY_STOPPING_PATIENCE_CV": 5,
-    "EARLY_STOPPING_PATIENCE_FINAL": 5,
+    "EARLY_STOPPING_PATIENCE_FINAL": 10,
     "EARLY_STOPPING_MIN_DELTA": 0.0001,   # melhora mínima exigida (em termos de val_err)
 
     # --------------------------------------------------------
@@ -182,7 +182,7 @@ CONFIG: Dict[str, Any] = {
 
     # Parâmetros p/ exponential_decay
     "LR_DECAY_EPOCHS": 2,          # a cada quantas épocas (em passos) aplica decaimento
-    "LR_DECAY_RATE": 0.90,
+    "LR_DECAY_RATE": 0.95,
     "LR_STAIRCASE": False,
 
     # Parâmetros p/ cosine_decay / cosine_decay_restarts
