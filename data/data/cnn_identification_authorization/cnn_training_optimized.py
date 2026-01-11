@@ -364,6 +364,7 @@ def build_min_resnet(cfg: Dict[str, Any], num_classes: int) -> Model:
     logits = layers.Dense(
         num_classes,
         kernel_regularizer=regularizers.l2(cfg["L2_WEIGHT"]),
+        dtype="float32",  # <<< ADD ISTO
         name="logits",
     )(x)
 
@@ -489,7 +490,8 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
             img = tf.ensure_shape(img, [img_size, img_size, channels])
         else:
             img = tf.image.resize(img, [img_size, img_size], method="bilinear")
-            img = tf.cast(img, tf.uint8)
+            img = tf.image.resize(img, [img_size, img_size], method="bilinear")
+            # NÃO faça cast pra uint8 aqui
 
         if training:
             if bool(cfg.get("AUG_HFLIP", True)):
@@ -558,12 +560,28 @@ def train_one_epoch(
     def train_step(x, y):
         with tf.GradientTape() as tape:
             logits = model(x, training=True)
-            loss = loss_fn(y, logits)
-            if model.losses:
-                loss = loss + tf.add_n(model.losses)
 
-        # Mixed precision loss scaling if present
-        if hasattr(optimizer, "get_scaled_loss"):
+            # 1) loss sempre em float32 (mais estável e evita mismatch)
+            base_loss = loss_fn(y, tf.cast(logits, tf.float32))
+            base_loss = tf.cast(base_loss, tf.float32)
+
+            # 2) regularization losses sempre em float32
+            if model.losses:
+                reg_loss = tf.add_n([tf.cast(l, tf.float32) for l in model.losses])
+            else:
+                reg_loss = tf.constant(0.0, dtype=tf.float32)
+
+            loss = base_loss + reg_loss
+
+        # Mixed precision loss scaling (suporta APIs antigas e novas)
+        if hasattr(optimizer, "scale_loss"):
+            scaled_loss = optimizer.scale_loss(loss)
+            scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
+            if hasattr(optimizer, "get_unscaled_gradients"):
+                grads = optimizer.get_unscaled_gradients(scaled_grads)
+            else:
+                grads = scaled_grads
+        elif hasattr(optimizer, "get_scaled_loss"):
             scaled_loss = optimizer.get_scaled_loss(loss)
             scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
             grads = optimizer.get_unscaled_gradients(scaled_grads)
@@ -622,19 +640,25 @@ def train_one_epoch(
     return mean_loss, acc, err, epoch_seconds
 
 
-def evaluate(model: Model, ds, loss_fn, cfg: Dict[str, Any]):
-    xla = bool(cfg.get("XLA", False))
+@tf.function(jit_compile=xla)
+def val_step(x, y):
+    logits = model(x, training=False)
 
-    @tf.function(jit_compile=xla)
-    def val_step(x, y):
-        logits = model(x, training=False)
-        loss = loss_fn(y, logits)
-        if model.losses:
-            loss = loss + tf.add_n(model.losses)
-        preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
-        correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
-        batch_n = tf.shape(y)[0]
-        return loss, correct, batch_n
+    base_loss = loss_fn(y, tf.cast(logits, tf.float32))
+    base_loss = tf.cast(base_loss, tf.float32)
+
+    if model.losses:
+        reg_loss = tf.add_n([tf.cast(l, tf.float32) for l in model.losses])
+    else:
+        reg_loss = tf.constant(0.0, dtype=tf.float32)
+
+    loss = base_loss + reg_loss
+
+    preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
+    correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
+    batch_n = tf.shape(y)[0]
+    return loss, correct, batch_n
+
 
     total_loss = 0.0
     total_correct = 0
