@@ -38,6 +38,8 @@ from typing import Dict, Tuple, List, Any, Optional
 
 import numpy as np
 import pandas as pd
+import os
+os.environ["DML_VISIBLE_DEVICES"] = "0"  # keep only adapter 0 (RTX)
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 from tensorflow.keras import mixed_precision
