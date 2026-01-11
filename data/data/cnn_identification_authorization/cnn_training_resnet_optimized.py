@@ -99,7 +99,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.002,       # top fração de classes mais frequentes (mantido)
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes (mantido)
     "KFOLDS": 2,
     "SEED": 42,
 
@@ -117,7 +117,7 @@ CONFIG: Dict[str, Any] = {
 
     # NOVO: Para o treino final (antes do teste), separamos uma validação interna
     # (para early stopping do treino final), por classe.
-    "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.10,
+    "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.20,
 
     # --------------------------------------------------------
     # Entrada
@@ -145,7 +145,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Regularização
     # --------------------------------------------------------
-    "L2_WEIGHT": 1e-4,                # L2 no kernel de Conv/Dense
+    "L2_WEIGHT": 5e-5,                # L2 no kernel de Conv/Dense
 
     # --------------------------------------------------------
     # Treino
@@ -156,11 +156,11 @@ CONFIG: Dict[str, Any] = {
     # mas agora você tem épocas separadas para CV e treino final.
     "EPOCHS": 50,                     # (mantido) - serve como default
 
-    "EPOCHS_CV": 50,                  # NOVO: max épocas por fold no CV
+    "EPOCHS_CV": 20,                  # NOVO: max épocas por fold no CV
     "EPOCHS_FINAL": 30,               # NOVO: max épocas do treino final (antes do teste final)
 
     # LR base (mantido), agora usado como "initial_lr" do schedule (se habilitado).
-    "LR": 1e-3,
+    "LR": 5e-2,
 
     # --------------------------------------------------------
     # NOVO: Early stopping
@@ -168,7 +168,7 @@ CONFIG: Dict[str, Any] = {
     # Se quiser desligar, coloque 0.
     "EARLY_STOPPING_PATIENCE_CV": 5,
     "EARLY_STOPPING_PATIENCE_FINAL": 5,
-    "EARLY_STOPPING_MIN_DELTA": 0.0,   # melhora mínima exigida (em termos de val_err)
+    "EARLY_STOPPING_MIN_DELTA": 0.0001,   # melhora mínima exigida (em termos de val_err)
 
     # --------------------------------------------------------
     # NOVO: Learning-rate schedule (Adam)
@@ -181,13 +181,13 @@ CONFIG: Dict[str, Any] = {
     "LR_SCHEDULE_TYPE": "cosine_decay",
 
     # Parâmetros p/ exponential_decay
-    "LR_DECAY_EPOCHS": 10.0,          # a cada quantas épocas (em passos) aplica decaimento
-    "LR_DECAY_RATE": 0.96,
+    "LR_DECAY_EPOCHS": 2,          # a cada quantas épocas (em passos) aplica decaimento
+    "LR_DECAY_RATE": 0.90,
     "LR_STAIRCASE": False,
 
     # Parâmetros p/ cosine_decay / cosine_decay_restarts
     "LR_COSINE_ALPHA": 0.0,           # LR final = alpha * initial_lr (no limite)
-    "LR_COSINE_FIRST_DECAY_EPOCHS": 10.0,  # só para restarts
+    "LR_COSINE_FIRST_DECAY_EPOCHS": 2.0,  # só para restarts
     "LR_COSINE_T_MUL": 2.0,           # só para restarts
     "LR_COSINE_M_MUL": 1.0,           # só para restarts
 
