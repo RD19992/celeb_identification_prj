@@ -72,17 +72,17 @@ configure_gpu_first_device()
 # =========================
 CONFIG: Dict[str, Any] = {
     # Data produced by ingestion script
-    "DATASET_DIR": Path(__file__).resolve().parent / "celeba_rgb_256x256",
+    "DATASET_DIR": Path(__file__).resolve().parent / "celeba_rgb_128x128",
     "MANIFEST_NAME": "manifest.csv",
     "ONLY_OK": True,                 # use ok==True if column exists
 
     # Class filtering
-    "TOP_CLASS_FRACTION": 0.01,       # top 1% most frequent classes
-    "KFOLDS": 3,
+    "TOP_CLASS_FRACTION": 0.05,       # top 1% most frequent classes
+    "KFOLDS": 2,
     "SEED": 42,
 
     # Input
-    "IMG_SIZE": 256,
+    "IMG_SIZE": 128,
     "IN_CHANNELS": 3,
     "NORM_MEAN": (0.485, 0.456, 0.406),
     "NORM_STD":  (0.229, 0.224, 0.225),
@@ -93,7 +93,7 @@ CONFIG: Dict[str, Any] = {
 
     # Minimal ResNet (explicit)
     "RES_LAYERS": [1, 1, 1],          # blocks per stage
-    "RES_CHANNELS": [64, 128, 256],   # width per stage
+    "RES_CHANNELS": [32, 64, 128],   # width per stage
     "USE_BN": True,
     "ACTIVATION": "relu",
     "BLOCK_DROPOUT": 0.0,
@@ -102,8 +102,8 @@ CONFIG: Dict[str, Any] = {
     "L2_WEIGHT": 1e-4,                # kernel L2 for Conv/Dense
 
     # Training
-    "BATCH_SIZE": 64,
-    "EPOCHS": 5,
+    "BATCH_SIZE": 16,
+    "EPOCHS": 10,
     "LR": 1e-3,
 
     # Performance / tf.data
@@ -119,9 +119,9 @@ CONFIG: Dict[str, Any] = {
     "JPEG_DCT_METHOD": "INTEGER_FAST",  # "INTEGER_FAST" or "INTEGER_ACCURATE"
 
     # Mixed precision / XLA
-    "MIXED_PRECISION": True,          # try True; if your backend is finicky, set False
+    "MIXED_PRECISION": False,          # try True; if your backend is finicky, set False
     "XLA": False,                      # jit_compile=True for train/eval steps
-    "ALLOW_TF32": True,               # Ampere+ CUDA: TF32 matmul speedup (harmless in most CV)
+    "ALLOW_TF32": False,               # Ampere+ CUDA: TF32 matmul speedup (harmless in most CV)
 
     # Debug / counters
     "LOG_EVERY_N_STEPS": 50,
