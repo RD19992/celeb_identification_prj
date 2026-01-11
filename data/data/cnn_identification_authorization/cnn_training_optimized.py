@@ -120,7 +120,7 @@ CONFIG: Dict[str, Any] = {
 
     # Mixed precision / XLA
     "MIXED_PRECISION": True,          # try True; if your backend is finicky, set False
-    "XLA": True,                      # jit_compile=True for train/eval steps
+    "XLA": False,                      # jit_compile=True for train/eval steps
     "ALLOW_TF32": True,               # Ampere+ CUDA: TF32 matmul speedup (harmless in most CV)
 
     # Debug / counters
@@ -573,22 +573,23 @@ def train_one_epoch(
 
             loss = base_loss + reg_loss
 
-        # Mixed precision loss scaling (suporta APIs antigas e novas)
-        if hasattr(optimizer, "scale_loss"):
-            scaled_loss = optimizer.scale_loss(loss)
-            scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
-            if hasattr(optimizer, "get_unscaled_gradients"):
-                grads = optimizer.get_unscaled_gradients(scaled_grads)
-            else:
-                grads = scaled_grads
-        elif hasattr(optimizer, "get_scaled_loss"):
+        # --- Mixed precision loss scaling (padrão canônico + robusto) ---
+        if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer) or (
+                hasattr(optimizer, "get_scaled_loss") and hasattr(optimizer, "get_unscaled_gradients")
+        ):
             scaled_loss = optimizer.get_scaled_loss(loss)
             scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
             grads = optimizer.get_unscaled_gradients(scaled_grads)
         else:
             grads = tape.gradient(loss, model.trainable_variables)
 
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        # --- Filtra grads None (evita "No gradients provided") ---
+        grads_and_vars = [(g, v) for (g, v) in zip(grads, model.trainable_variables) if g is not None]
+        if not grads_and_vars:
+            # Isso te dá diagnóstico imediato, em vez de stack trace críptico:
+            raise RuntimeError("Todos os gradientes vieram None. Provável overflow/NaN ou perda desconectada do grafo.")
+
+        optimizer.apply_gradients(grads_and_vars)
 
         preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
         correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
@@ -640,25 +641,28 @@ def train_one_epoch(
     return mean_loss, acc, err, epoch_seconds
 
 
-@tf.function(jit_compile=xla)
-def val_step(x, y):
-    logits = model(x, training=False)
+#@tf.function(jit_compile=xla)
+def evaluate(model: Model, ds, loss_fn, cfg: Dict[str, Any]):
+    xla = bool(cfg.get("XLA", False))
 
-    base_loss = loss_fn(y, tf.cast(logits, tf.float32))
-    base_loss = tf.cast(base_loss, tf.float32)
+    @tf.function(jit_compile=xla)
+    def val_step(x, y):
+        logits = model(x, training=False)
 
-    if model.losses:
-        reg_loss = tf.add_n([tf.cast(l, tf.float32) for l in model.losses])
-    else:
-        reg_loss = tf.constant(0.0, dtype=tf.float32)
+        base_loss = loss_fn(y, tf.cast(logits, tf.float32))
+        base_loss = tf.cast(base_loss, tf.float32)
 
-    loss = base_loss + reg_loss
+        if model.losses:
+            reg_loss = tf.add_n([tf.cast(l, tf.float32) for l in model.losses])
+        else:
+            reg_loss = tf.constant(0.0, dtype=tf.float32)
 
-    preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
-    correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
-    batch_n = tf.shape(y)[0]
-    return loss, correct, batch_n
+        loss = base_loss + reg_loss
 
+        preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
+        correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
+        batch_n = tf.shape(y)[0]
+        return loss, correct, batch_n
 
     total_loss = 0.0
     total_correct = 0
@@ -675,6 +679,7 @@ def val_step(x, y):
     acc = total_correct / max(total_seen, 1)
     err = 1.0 - acc
     return mean_loss, acc, err
+
 
 
 # =========================
