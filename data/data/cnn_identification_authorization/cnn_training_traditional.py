@@ -99,7 +99,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.10,       # top fração de classes mais frequentes (mantido)
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes (mantido)
     "KFOLDS": 2,
     "SEED": 42,
 
@@ -157,11 +157,11 @@ CONFIG: Dict[str, Any] = {
     "CNN_POOL2_SIZE": (2, 2),
     "CNN_POOL2_STRIDES": (2, 2),
 
-    "CNN_DENSE_UNITS": 128,
+    "CNN_DENSE_UNITS": 64,
     "CNN_DENSE_ACTIVATION": "relu",
 
     # Dropout opcional na "head" (não está no slide; default 0.0 para manter arquitetura idêntica)
-    "CNN_HEAD_DROPOUT": 0.0,
+    "CNN_HEAD_DROPOUT": 0.3,
 
     # Saída softmax (como no slide)
     "CNN_OUTPUT_ACTIVATION": "softmax",
@@ -173,7 +173,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Regularização
     # --------------------------------------------------------
-    "L2_WEIGHT": 1e-5,                # L2 no kernel de Conv/Dense
+    "L2_WEIGHT": 1e-4,                # L2 no kernel de Conv/Dense
 
     # --------------------------------------------------------
     # Treino
