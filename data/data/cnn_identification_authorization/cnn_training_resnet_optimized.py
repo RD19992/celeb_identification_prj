@@ -141,6 +141,7 @@ CONFIG: Dict[str, Any] = {
     "USE_BN": True,                  # BatchNorm (normalização em batch)
     "ACTIVATION": "relu",
     "BLOCK_DROPOUT": 0.1,
+    "HEAD_DROPOUT": 0.3,
 
     # --------------------------------------------------------
     # Regularização
@@ -753,6 +754,7 @@ def build_min_resnet(cfg: Dict[str, Any], num_classes: int) -> Model:
 
     # Pooling global (reduz HxW para 1 por canal)
     x = layers.GlobalAveragePooling2D(name="gap")(x)
+    x = layers.Dropout(cfg["head_dropout"], name="head_dropout")(x)
 
     # Camada final: logits (dtype float32 para estabilidade, especialmente se mixed precision)
     logits = layers.Dense(
