@@ -136,8 +136,8 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # ResNet mínima (explícita)
     # --------------------------------------------------------
-    "RES_LAYERS": [1, 1, 2, 2],          # blocks por estágio
-    "RES_CHANNELS": [32, 64, 96, 128],    # largura (canais) por estágio
+    "RES_LAYERS": [1, 1, 1, 2, 2, 2],          # blocks por estágio
+    "RES_CHANNELS": [48, 64, 80, 96, 112, 128],    # largura (canais) por estágio
     "USE_BN": True,                  # BatchNorm (normalização em batch)
     "ACTIVATION": "relu",
     "BLOCK_DROPOUT": 0.1,
