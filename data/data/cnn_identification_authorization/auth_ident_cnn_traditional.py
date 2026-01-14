@@ -550,10 +550,11 @@ def mlp_forward_inference(
             assume_ingested_size = bool(inference_params.get("assume_ingested_size", True))
             jpeg_dct_method = str(inference_params.get("jpeg_dct_method", "INTEGER_FAST"))
 
-            mean = np.asarray(inference_params.get("norm_mean", [0.0, 0.0, 0.0]), dtype=np.float32).reshape((1, 1, 1, -1))
-            std = np.asarray(inference_params.get("norm_std", [1.0, 1.0, 1.0]), dtype=np.float32).reshape((1, 1, 1, -1))
-            mean_tf = tf.constant(mean, dtype=tf.float32)
-            std_tf = tf.constant(std, dtype=tf.float32)
+            mean_vec = np.asarray(inference_params.get("norm_mean", [0.0, 0.0, 0.0]), dtype=np.float32).reshape((-1,))
+            std_vec  = np.asarray(inference_params.get("norm_std",  [1.0, 1.0, 1.0]), dtype=np.float32).reshape((-1,))
+            # broadcast correto: (H,W,C) +/- (C,) -> (H,W,C) (sem criar dimensão extra 1)
+            mean_tf = tf.constant(mean_vec, dtype=tf.float32)
+            std_tf  = tf.constant(std_vec, dtype=tf.float32)
 
             def _parse(path_tensor: tf.Tensor) -> tf.Tensor:
                 img_bytes = tf.io.read_file(path_tensor)
@@ -1425,6 +1426,9 @@ def build_eval_split_from_payload(X: np.ndarray, y: np.ndarray,
 
 
 def main():
+    # RNG para amostragens reprodutíveis (one-vs-all, pares, etc.)
+    rng = np.random.default_rng(int(SCRIPT_CONFIG.get("seed", 42)))
+
     # ------------------------------------------------------------
     # Resolução do run_dir (para salvar outputs junto do treino)
     # ------------------------------------------------------------
@@ -1589,7 +1593,7 @@ def main():
         y=y,
         paths=paths,
         ids=ids,
-        conf=conf,
+        payload_conf=conf,
         standardizer=standardizer,
         classes_modelo=classes_modelo,
     )
