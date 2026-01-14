@@ -39,7 +39,7 @@ import time
 import joblib
 import numpy as np
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 from sklearn.model_selection import train_test_split
 
@@ -47,6 +47,7 @@ from sklearn.model_selection import train_test_split
 # CONFIG DO SCRIPT (ajuste aqui)
 # ============================================================
 
+import os
 import json
 import pandas as pd
 import tensorflow as tf
@@ -57,8 +58,12 @@ def load_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 SCRIPT_CONFIG = {
-    # nome do arquivo salvo pelo script de treino (na mesma pasta)
+    # nome do arquivo salvo pelo script de treino (dentro do run_dir)
     "model_payload_file": "models/final_model_best.keras",
+
+    # opcional: apontar diretamente para um run_dir específico (onde estão hyperparameters.json, label2idx.json, models/)
+    # se None, o script tentará auto-detectar o run mais recente em ./celeba_rgb_128x128/runs/ e vizinhança.
+    "run_dir_override": None,
 
     # se quiser sobrescrever o caminho do joblib HOG/dataset
     "dataset_path_override": None,  # ex.: r"C:\\...\\celeba_hog_128x128_o9.joblib"
@@ -127,16 +132,114 @@ SCRIPT_CONFIG = {
 }
 
 
+def _resolve_out_dir() -> Path:
+    """Resolve o diretório de execução (out_dir) onde estão:
+      - hyperparameters.json
+      - label2idx.json
+      - models/*.keras
+
+    Para manter a lógica do script original (tudo 'na mesma pasta'),
+    aqui 'a mesma pasta' passa a ser o run_dir gerado pelo treino da CNN tradicional.
+    """
+    base_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
+
+    override = SCRIPT_CONFIG.get("run_dir_override") or os.environ.get("AUTH_IDENT_RUN_DIR") or os.environ.get("CNN_RUN_DIR")
+    if override:
+        p = Path(str(override)).expanduser()
+        return p
+
+    # Candidatos comuns (seguindo cnn_traditional.py)
+    candidates = [
+        base_dir,
+        base_dir / "runs",
+        base_dir / "celeba_rgb_128x128" / "runs",
+    ]
+
+    # Também tenta descobrir qualquer 'runs' até 2 níveis abaixo
+    try:
+        for p in base_dir.glob("*/runs"):
+            candidates.append(p)
+        for p in base_dir.glob("*/*/runs"):
+            candidates.append(p)
+    except Exception:
+        pass
+
+    run_dirs: List[Path] = []
+    for root in candidates:
+        if not root.exists() or not root.is_dir():
+            continue
+
+        # Caso root já seja um run_dir
+        if (root / "hyperparameters.json").exists() and (root / "label2idx.json").exists():
+            run_dirs.append(root)
+            continue
+
+        # Caso root seja o diretório 'runs'
+        try:
+            for sub in root.iterdir():
+                if sub.is_dir() and (sub / "hyperparameters.json").exists() and (sub / "label2idx.json").exists():
+                    run_dirs.append(sub)
+        except Exception:
+            pass
+
+    if not run_dirs:
+        return base_dir
+
+    def score(rd: Path):
+        model_dir = rd / "models"
+        has_model = False
+        try:
+            has_model = model_dir.exists() and any(model_dir.glob("*.keras"))
+        except Exception:
+            has_model = False
+        try:
+            mtime = max((rd / "hyperparameters.json").stat().st_mtime, rd.stat().st_mtime)
+        except Exception:
+            mtime = rd.stat().st_mtime if rd.exists() else 0.0
+        return (1 if has_model else 0, mtime)
+
+    run_dirs.sort(key=score, reverse=True)
+    return run_dirs[0]
+
+
+def _resolve_model_path(out_dir: Path, cfg_train: Dict[str, Any]) -> Path:
+    """Resolve caminho do modelo Keras a partir de:
+      - SCRIPT_CONFIG['model_payload_file']
+      - cfg_train['FINAL_MODEL_FILENAME'] (se existir)
+      - fallback: *.keras mais recente em out_dir/models/
+    """
+    rel = str(SCRIPT_CONFIG.get("model_payload_file", "models/final_model_best.keras"))
+    final_name = cfg_train.get("FINAL_MODEL_FILENAME")
+    if final_name and rel.startswith("models/"):
+        rel = f"models/{final_name}"
+
+    model_path = out_dir / rel
+    if model_path.exists():
+        return model_path
+
+    models_dir = out_dir / "models"
+    if models_dir.exists():
+        cands = sorted(models_dir.glob("*.keras"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if cands:
+            print(f"[WARN] Modelo padrão não encontrado ({model_path.name}); usando o mais recente em models/: {cands[0].name}")
+            return cands[0]
+
+    raise FileNotFoundError(f"Modelo Keras não encontrado: {model_path}")
+
+
 # ============================================================
 # IO DO DATASET (HOG joblib)
 # ============================================================
 
-def carregar_dataset_joblib(path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+def carregar_dataset_joblib(path: str, *, label2idx: Optional[Dict[int, int]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Carrega dataset.
 
     Suporta 2 formatos:
       1) .joblib (original, para MLP/HOG)  -> mantém comportamento;
-      2) manifest.csv (CNN tradicional)    -> lê caminhos e carrega imagens (uint8).
+      2) manifest.csv (CNN tradicional)    -> retorna caminhos (string) e y reindexado.
+
+    Observação: no caso do manifest.csv, a remapeação label->y depende de label2idx.json
+    (passado via label2idx).
     """
     p = Path(path)
     if p.is_dir():
@@ -145,80 +248,108 @@ def carregar_dataset_joblib(path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str
             p = cand
 
     if p.suffix.lower() == ".csv":
-        return carregar_dataset_manifest_csv(str(p))
+        return carregar_dataset_manifest_csv(str(p), label2idx=label2idx)
 
-    obj = joblib.load(str(p))
-    X = obj["X"] if isinstance(obj, dict) else obj[0]
-    y = obj["y"] if isinstance(obj, dict) else obj[1]
-    meta: Dict[str, Any] = {}
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k not in ("X", "y"):
-                meta[k] = v
+    # joblib (fluxo original)
+    import joblib
+    data = joblib.load(str(p))
+    X = np.asarray(data["X"], dtype=np.float32)
+    y = np.asarray(data["y"], dtype=np.int64)
+    meta = data.get("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
     return X, y, meta
 
 
-def carregar_dataset_manifest_csv(manifest_csv: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """Lê o manifest.csv e carrega imagens em memória como uint8 (N,H,W,3).
+def carregar_dataset_manifest_csv(manifest_csv: str, *, label2idx: Optional[Dict[int, int]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Lê o manifest.csv para o caso CNN tradicional.
 
-    Espera colunas:
-      - dst: caminho do arquivo de imagem
+    Retorna:
+      - X: array (N,) de caminhos para imagem (string)
+      - y: array (N,) com rótulos reindexados (0..C-1) compatíveis com o modelo
+      - meta: dicionário com chaves 'paths' (iguais a X) e 'ids' (rótulos originais)
+
+    Espera colunas no CSV (conforme o script de treino da CNN):
+      - dst: caminho do arquivo de imagem (absoluto ou relativo ao diretório do manifest)
       - label: id da classe/identidade (numérico)
-      - ok (opcional): 1/0 para filtrar exemplos válidos
+      - ok (opcional): 1/0 ou True/False para filtrar exemplos válidos
 
-    A remapeação label->y (0..C-1) é feita usando label2idx.json no mesmo run_dir do script.
+    A remapeação label->y é feita via label2idx.json gerado no treino (passado em label2idx).
+    Se label2idx não for fornecido, tenta carregar 'label2idx.json' no mesmo diretório do manifest
+    (fallback útil quando o script é executado dentro do run_dir).
     """
-    run_dir = Path(__file__).resolve().parent
-    label2idx_path = run_dir / "label2idx.json"
-    if not label2idx_path.exists():
-        raise FileNotFoundError(f"label2idx.json não encontrado em {run_dir}. Esperado: {label2idx_path}")
-    label2idx_raw = load_json(str(label2idx_path))
-    label2idx = {int(k): int(v) for k, v in label2idx_raw.items()}
+    import pandas as pd
 
-    df = pd.read_csv(manifest_csv)
-    if "dst" not in df.columns or "label" not in df.columns:
-        raise ValueError(f"manifest.csv precisa ter colunas 'dst' e 'label'. Colunas encontradas: {list(df.columns)}")
+    p = Path(manifest_csv).resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"manifest.csv não encontrado: {p}")
 
+    df = pd.read_csv(p)
+
+    # ok (opcional)
     if "ok" in df.columns:
-        df = df[df["ok"].astype(int) == 1].copy()
+        okv = df["ok"]
+        if okv.dtype == bool:
+            df = df[okv]
+        else:
+            df = df[okv.astype(int) == 1]
 
-    # Remove arquivos inexistentes
-    df = df[df["dst"].map(lambda p: Path(str(p)).exists())].copy()
+    if "dst" not in df.columns or "label" not in df.columns:
+        raise ValueError("manifest.csv deve ter colunas 'dst' e 'label'.")
 
-    # Remapeia labels para y do modelo (0..C-1); descarta labels fora do modelo
-    def _map_label(lbl):
-        try:
-            return label2idx.get(int(lbl), None)
-        except Exception:
-            return None
+    # resolver caminhos (se relativos ao diretório do manifest)
+    base_dir = p.parent
+    dst = df["dst"].astype(str).tolist()
+    dst_resolved: List[str] = []
+    for s in dst:
+        sp = Path(s)
+        if not sp.is_absolute():
+            sp = (base_dir / sp).resolve()
+        dst_resolved.append(str(sp))
 
-    df["y"] = df["label"].map(_map_label)
-    df = df[df["y"].notna()].copy()
-    df["y"] = df["y"].astype(int)
+    # label2idx
+    if label2idx is None:
+        cand = base_dir / "label2idx.json"
+        if cand.exists():
+            with open(cand, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            # json pode ter chaves str -> converter
+            label2idx = {int(k): int(v) for k, v in raw.items()}
+        else:
+            label2idx = {}
 
-    hyp_path = run_dir / "hyperparameters.json"
-    img_size = 128
-    if hyp_path.exists():
-        try:
-            hyp = load_json(str(hyp_path))
-            img_size = int(hyp.get("IMG_SIZE", img_size))
-        except Exception:
-            pass
+    # mapear labels originais para y reindexado
+    labels_orig = df["label"].astype(int).to_numpy()
+    y_list: List[int] = []
+    x_list: List[str] = []
+    id_list: List[int] = []
 
-    paths = df["dst"].astype(str).tolist()
-    labels_orig = df["label"].astype(int).tolist()
-    y = df["y"].to_numpy(dtype=np.int64)
+    for spath, lab in zip(dst_resolved, labels_orig):
+        if label2idx:
+            if int(lab) not in label2idx:
+                continue
+            yv = int(label2idx[int(lab)])
+        else:
+            # fallback: sem label2idx, usa label como está (pode não bater com o modelo!)
+            yv = int(lab)
 
-    X_list: List[np.ndarray] = []
-    for fp in paths:
-        img = Image.open(fp).convert("RGB")
-        if img.size != (img_size, img_size):
-            img = img.resize((img_size, img_size), resample=Image.BILINEAR)
-        X_list.append(np.asarray(img, dtype=np.uint8))
+        if not Path(spath).exists():
+            continue
 
-    X = np.stack(X_list, axis=0)
-    meta = {"paths": paths, "ids": labels_orig, "img_size": img_size}
+        x_list.append(spath)
+        y_list.append(yv)
+        id_list.append(int(lab))
+
+    X = np.asarray(x_list, dtype=str)
+    y = np.asarray(y_list, dtype=np.int64)
+
+    meta: Dict[str, Any] = {
+        "paths": X.copy(),
+        "ids": np.asarray(id_list, dtype=np.int64),
+    }
     return X, y, meta
+
+
 def selecionar_classes_elegiveis(y: np.ndarray, min_amostras: int) -> np.ndarray:
     classes, counts = np.unique(y, return_counts=True)
     return classes[counts >= int(min_amostras)].astype(np.int64, copy=False)
@@ -252,34 +383,42 @@ def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.nda
 def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     """Aplica padronização.
 
+    Mantém o contrato do script original, mas com um detalhe extra:
+    - Se X for um vetor de *caminhos de arquivo* (dtype string/object), não padroniza aqui
+      (a normalização é aplicada on-the-fly no pipeline TensorFlow em inferência).
     - Para vetores (MLP/HOG): comportamento idêntico ao original.
     - Para imagens (CNN) em N,H,W,C:
         * se X for uint8/uint16, assume [0,255] e converte para [0,1];
         * aplica (X-mean)/std com broadcasting em C;
         * é idempotente: se parecer já padronizado, não padroniza de novo.
     """
-    Xf = X.astype(np.float32, copy=False)
-    mean_arr = np.asarray(mean, dtype=np.float32)
-    std_arr = np.asarray(std, dtype=np.float32)
+    X = np.asarray(X)
 
+    # Caso CNN (lazy): X é array de caminhos -> padronização ocorre na leitura via tf.data
+    if X.ndim == 1 and X.dtype.kind in ("U", "S", "O"):
+        return X
+
+    Xf = X.astype(np.float32, copy=False)
+    mean_arr = np.asarray(mean, dtype=np.float32).reshape((1, 1, 1, -1)) if Xf.ndim == 4 else np.asarray(mean, dtype=np.float32)
+    std_arr = np.asarray(std, dtype=np.float32).reshape((1, 1, 1, -1)) if Xf.ndim == 4 else np.asarray(std, dtype=np.float32)
+
+    # Heurística simples de idempotência p/ imagens:
     if Xf.ndim == 4:
-        flat = Xf.reshape(-1)
-        step = max(1, flat.size // 2048)
-        sample = flat[::step]
-        # Heurística para evitar padronização dupla
-        if (sample.min() < -0.5) or (sample.max() > 1.5):
+        # se já parece em escala "padronizada" (valores típicos perto de 0)
+        mx = float(np.nanmax(np.abs(Xf))) if Xf.size else 0.0
+        if mx < 6.0:
             return Xf
 
-        if X.dtype in (np.uint8, np.uint16, np.int16, np.int32, np.int64):
-            Xf = Xf / 255.0
+        # se parece em [0,255], converte p/ [0,1]
+        if float(np.nanmax(Xf)) > 3.0:
+            Xf = Xf / np.float32(255.0)
 
-        if mean_arr.ndim == 1:
-            mean_arr = mean_arr.reshape((1, 1, 1, -1))
-        if std_arr.ndim == 1:
-            std_arr = std_arr.reshape((1, 1, 1, -1))
         return (Xf - mean_arr) / std_arr
 
+    # Vetores (MLP/HOG)
     return (Xf - mean_arr) / std_arr
+
+
 def stable_softmax(Z: np.ndarray):
     Z = Z.astype(np.float32, copy=False)
     Zm = Z - Z.max(axis=1, keepdims=True)
@@ -357,64 +496,87 @@ def layernorm_forward(Z: np.ndarray, gamma: np.ndarray, beta: np.ndarray, eps: f
 
 
 def mlp_forward_inference(
-        X: np.ndarray,
-        modelo: Dict[str, Any],
-        inference_params: Dict[str, Any],
-):
+    X: np.ndarray,
+    modelo: Any,
+    inference_params: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Forward pass de inferência compatível com 2 cenários:
+
+    1) modelo == dict (payload do MLP/HOG original):
+       - Mantém exatamente o comportamento esperado no auth_ident original.
+
+    2) modelo == tf.keras.Model (CNN tradicional):
+       - X pode ser:
+         a) array (N,) de caminhos de arquivo (string/object) -> lê/normaliza via tf.data;
+         b) array numérico (N,H,W,C) já carregado -> faz predict direto.
+       - Retorna:
+         P: (N, C) probabilidades (softmax)
+         A1_pre: (N, D) embedding (saída da camada indicada por inference_params['embedding_layer_name'])
     """
-    Retorna (P, A1_pre) onde:
-      - P: probabilidades (B,K)
-      - A1_pre: ativação da camada escondida (B,H) (antes de dropout)
-    Nota: neste script adaptado, 'modelo' pode ser um tf.keras.Model (CNN), mantendo o mesmo contrato (retorna P e A1_pre).
-    """
-    # --- Caminho CNN/Keras ---
+    X = np.asarray(X)
+
+    # ===== Caso original (MLP/HOG) =====
+    if isinstance(modelo, dict) and "weights" in modelo:
+        # Mantém o comportamento do script original
+        P, A1_pre = mlp_forward(
+            X,
+            modelo,
+            training=False,
+            inference_only=True,
+            inference_params=inference_params,
+        )
+        return P.astype(np.float32), A1_pre.astype(np.float32)
+
+    # ===== Caso CNN (Keras) =====
     if hasattr(modelo, "predict") and hasattr(modelo, "layers"):
         batch_size = int(inference_params.get("batch_size", 64))
-        P = np.asarray(modelo.predict(X, batch_size=batch_size, verbose=0), dtype=np.float32)
+        embedding_layer_name = str(inference_params.get("embedding_layer_name", "dense"))
 
-        emb_layer_name = str(inference_params.get("embedding_layer_name", "dense"))
-        emb_model = inference_params.get("_embedding_model", None)
-        if emb_model is None:
+        # model que devolve [probs, embedding] em 1 só forward
+        combined = inference_params.get("_combined_model", None)
+        if combined is None:
             try:
-                emb_model = tf.keras.Model(inputs=modelo.input, outputs=modelo.get_layer(emb_layer_name).output)
+                emb_out = modelo.get_layer(embedding_layer_name).output
             except Exception:
-                emb_model = tf.keras.Model(inputs=modelo.input, outputs=modelo.layers[-2].output)
-            inference_params["_embedding_model"] = emb_model
+                # fallback: penúltima camada
+                emb_out = modelo.layers[-2].output
+            combined = tf.keras.Model(inputs=modelo.input, outputs=[modelo.output, emb_out])
+            inference_params["_combined_model"] = combined
 
-        A1_pre = np.asarray(emb_model.predict(X, batch_size=batch_size, verbose=0), dtype=np.float32)
-        return P, A1_pre
+        # X como caminhos (lazy)
+        if X.ndim == 1 and X.dtype.kind in ("U", "S", "O"):
+            img_size = int(inference_params.get("img_size", 128))
+            channels = int(inference_params.get("channels", 3))
+            assume_ingested_size = bool(inference_params.get("assume_ingested_size", True))
+            jpeg_dct_method = str(inference_params.get("jpeg_dct_method", "INTEGER_FAST"))
 
-    X = X.astype(np.float32, copy=False)
+            mean = np.asarray(inference_params.get("norm_mean", [0.0, 0.0, 0.0]), dtype=np.float32).reshape((1, 1, 1, -1))
+            std = np.asarray(inference_params.get("norm_std", [1.0, 1.0, 1.0]), dtype=np.float32).reshape((1, 1, 1, -1))
+            mean_tf = tf.constant(mean, dtype=tf.float32)
+            std_tf = tf.constant(std, dtype=tf.float32)
 
-    W1 = modelo["W1"];
-    b1 = modelo["b1"]
-    W2 = modelo["W2"];
-    b2 = modelo["b2"]
-    act_hidden = modelo.get("act_hidden", inference_params.get("act_hidden", "relu"))
-    act_output = modelo.get("act_output", inference_params.get("act_output", "cosine_softmax"))
+            def _parse(path_tensor: tf.Tensor) -> tf.Tensor:
+                img_bytes = tf.io.read_file(path_tensor)
+                img = tf.image.decode_jpeg(img_bytes, channels=channels, dct_method=jpeg_dct_method)
+                img = tf.image.convert_image_dtype(img, tf.float32)
+                if not assume_ingested_size:
+                    img = tf.image.resize(img, [img_size, img_size], antialias=True)
+                img = (img - mean_tf) / std_tf
+                return img
 
-    ln_gamma = modelo.get("ln_gamma", None)
-    ln_beta = modelo.get("ln_beta", None)
-    use_layernorm = bool(inference_params.get("use_layernorm", ln_gamma is not None and ln_beta is not None))
-    ln_eps = float(inference_params.get("layernorm_eps", 1e-5))
+            paths_tf = tf.convert_to_tensor(X.astype(str))
+            ds = tf.data.Dataset.from_tensor_slices(paths_tf)
+            ds = ds.map(_parse, num_parallel_calls=tf.data.AUTOTUNE)
+            ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    # camada 1
-    Z1 = X @ W1 + b1
-    if use_layernorm and (ln_gamma is not None) and (ln_beta is not None):
-        Z1 = layernorm_forward(Z1, ln_gamma, ln_beta, eps=ln_eps)
+            P, A1_pre = combined.predict(ds, verbose=0)
+        else:
+            # numérico já carregado (idealmente já normalizado por apply_standardizer)
+            P, A1_pre = combined.predict(X, batch_size=batch_size, verbose=0)
 
-    A1_pre = activation_forward(Z1, act_hidden)
+        return np.asarray(P, dtype=np.float32), np.asarray(A1_pre, dtype=np.float32)
 
-    # logits e softmax
-    Z2 = output_logits_forward(
-        A1_pre, W2, b2,
-        act_output=act_output,
-        scale=float(inference_params.get("cosine_softmax_scale", 20.0)),
-        eps=float(inference_params.get("cosine_softmax_eps", 1e-8)),
-        use_bias=bool(inference_params.get("cosine_softmax_use_bias", False)),
-    )
-    P = stable_softmax(Z2)
-    return P, A1_pre
+    raise TypeError("Formato de 'modelo' não suportado para inferência.")
 
 
 def predict_labels(X: np.ndarray, classes: np.ndarray, modelo: Dict[str, Any], inference_params: Dict[str, Any]):
@@ -1263,82 +1425,209 @@ def build_eval_split_from_payload(X: np.ndarray, y: np.ndarray,
 
 
 def main():
-    rng = np.random.default_rng(int(SCRIPT_CONFIG["seed"]))
+    # ------------------------------------------------------------
+    # Resolução do run_dir (para salvar outputs junto do treino)
+    # ------------------------------------------------------------
+    script_dir = Path(__file__).resolve().parent
+    model_payload_file = str(SCRIPT_CONFIG.get("model_payload_file", "models/final_model_best.keras"))
 
-    out_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
-    # --- Carrega modelo CNN (Keras) + metadados (no mesmo run_dir) ---
-    model_path = out_dir / str(SCRIPT_CONFIG["model_payload_file"])
+    def _detect_latest_run_dir(base: Path) -> Optional[Path]:
+        candidates: List[Path] = []
+
+        # 1) Se o script está dentro do próprio run_dir
+        if (base / "hyperparameters.json").exists() and (base / model_payload_file).exists():
+            candidates.append(base)
+
+        # 2) Padrão do projeto: <dataset_dir>/runs/<timestamp>/
+        # Procuramos por qualquer .../runs/<run>/models/final_model_best.keras nas redondezas.
+        search_roots = [base] + list(base.parents)[:4]
+        for root in search_roots:
+            for runs_dir in root.glob("**/runs"):
+                if not runs_dir.is_dir():
+                    continue
+                for run_dir in runs_dir.iterdir():
+                    if not run_dir.is_dir():
+                        continue
+                    if (run_dir / model_payload_file).exists() and (run_dir / "hyperparameters.json").exists():
+                        candidates.append(run_dir)
+
+        if not candidates:
+            return None
+
+        # Preferir o nome (timestamps) e, como desempate, mtime
+        def _key(p: Path):
+            try:
+                name_key = p.name
+            except Exception:
+                name_key = ""
+            try:
+                mtime = p.stat().st_mtime
+            except Exception:
+                mtime = 0.0
+            return (name_key, mtime)
+
+        return sorted(candidates, key=_key)[-1]
+
+    run_dir_override = SCRIPT_CONFIG.get("run_dir_override", None)
+    if run_dir_override:
+        out_dir = Path(run_dir_override).resolve()
+    else:
+        detected = _detect_latest_run_dir(script_dir)
+        out_dir = detected if detected is not None else script_dir
+
+    # ------------------------------------------------------------
+    # Carrega modelo (CNN) e configurações do treino (hyperparams)
+    # ------------------------------------------------------------
+    model_path = out_dir / model_payload_file
     if not model_path.exists():
-        raise FileNotFoundError(f"Modelo Keras não encontrado: {model_path}")
+        raise FileNotFoundError(f"Modelo não encontrado: {model_path}")
 
-    hyp_path = out_dir / "hyperparameters.json"
-    if not hyp_path.exists():
-        raise FileNotFoundError(f"hyperparameters.json não encontrado em {out_dir}: {hyp_path}")
-    cfg_train = load_json(str(hyp_path))
+    try:
+        modelo = tf.keras.models.load_model(str(model_path), compile=False)
+    except Exception:
+        # fallback sem compile=False (algumas versões)
+        modelo = tf.keras.models.load_model(str(model_path))
 
+    print(f"[INFO] Modelo CNN carregado: {model_path}")
+
+    cfg_train_path = out_dir / "hyperparameters.json"
+    if not cfg_train_path.exists():
+        raise FileNotFoundError(f"hyperparameters.json não encontrado: {cfg_train_path}")
+    with open(cfg_train_path, "r", encoding="utf-8") as f:
+        cfg_train = json.load(f)
+
+    # label2idx (map label original -> y reindexado compatível com o modelo)
     label2idx_path = out_dir / "label2idx.json"
-    if not label2idx_path.exists():
-        raise FileNotFoundError(f"label2idx.json não encontrado em {out_dir}: {label2idx_path}")
-    label2idx_raw = load_json(str(label2idx_path))
-    label2idx = {int(k): int(v) for k, v in label2idx_raw.items()}
-    num_classes = len(label2idx)
+    label2idx: Dict[int, int] = {}
+    if label2idx_path.exists():
+        with open(label2idx_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        label2idx = {int(k): int(v) for k, v in raw.items()}
+
+    # número de classes (preferimos hyperparams; fallback: shape do modelo)
+    num_classes = int(cfg_train.get("NUM_CLASSES", 0) or (modelo.output_shape[-1] if hasattr(modelo, "output_shape") else 0))
+    if num_classes <= 0:
+        raise ValueError("Não foi possível determinar NUM_CLASSES (hyperparameters.json ou output_shape do modelo).")
+
     classes_modelo = np.arange(num_classes, dtype=np.int64)
-
-    standardizer = {
-        "mean": np.asarray(cfg_train.get("NORM_MEAN", [0.485, 0.456, 0.406]), dtype=np.float32),
-        "std": np.asarray(cfg_train.get("NORM_STD", [0.229, 0.224, 0.225]), dtype=np.float32),
-    }
-
-    seed = int(cfg_train.get("SEED", 42))
-    k_folds = int(cfg_train.get("KFOLDS", 5))
-    payload_conf = {
-        "min_amostras_por_classe": k_folds,
-        "frac_classes": 1.0,
-        "seed_classes": seed,
-        "test_frac": float(cfg_train.get("FINAL_TEST_FRACTION_PER_CLASS", 0.2)),
-        "seed_split": seed,
-        "min_train_por_classe": k_folds,
-        "k_folds": k_folds,
-        "dataset_path": str(Path(cfg_train.get("DATASET_DIR", "")) / "manifest.csv"),
-    }
-
-    inference_params = {
-        "batch_size": int(cfg_train.get("BATCH_SIZE", 64)),
-        "embedding_layer_name": str(cfg_train.get("EMBEDDING_LAYER_NAME", "dense")),
-        "eps": 1e-8,
-    }
-
-    modelo = tf.keras.models.load_model(str(model_path))
-
-    print(f"\n[INFO] Modelo CNN carregado: {model_path}")
     print(f"[INFO] Num classes: {num_classes}")
 
-    dataset_path = str(payload_conf.get("dataset_path", ""))
-    if dataset_path and not Path(dataset_path).exists():
-        # fallback: inferir a partir do run_dir do script
-        cand = out_dir.parent.parent / "manifest.csv"
-        if cand.exists():
-            dataset_path = str(cand)
-    if SCRIPT_CONFIG.get("dataset_path_override"):
-        dataset_path = str(SCRIPT_CONFIG["dataset_path_override"])
-    if not dataset_path or not Path(dataset_path).exists():
-        raise FileNotFoundError(f"manifest.csv não encontrado. dataset_path={dataset_path}")
+    # ------------------------------------------------------------
+    # Dataset (manifest.csv) – localizar caminho de forma robusta
+    # ------------------------------------------------------------
+    dataset_dir_cfg = str(cfg_train.get("DATASET_DIR", "")).strip()
+    dataset_dir = Path(dataset_dir_cfg) if dataset_dir_cfg else None
+    if dataset_dir is None or not dataset_dir.exists():
+        # padrão: .../<dataset_dir>/runs/<run_dir>/  -> dataset_dir = run_dir/../..
+        if out_dir.parent.name == "runs":
+            dataset_dir = out_dir.parent.parent
+        else:
+            dataset_dir = out_dir
+
+    dataset_path = SCRIPT_CONFIG.get("dataset_path_override", None)
+    if dataset_path:
+        dataset_path = Path(dataset_path).resolve()
+    else:
+        dataset_path = (dataset_dir / "manifest.csv").resolve()
+
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"manifest.csv não encontrado: {dataset_path}")
 
     print(f"[INFO] Dataset (manifest) = {dataset_path}")
 
-    mean = np.asarray(standardizer["mean"], dtype=np.float32)
-    std = np.asarray(standardizer["std"], dtype=np.float32)
-    X_train_feat_t = apply_standardizer(X_train_t, mean, std)
+    # ------------------------------------------------------------
+    # Parâmetros (mantendo a lógica do script original)
+    # ------------------------------------------------------------
+    seed_split = int(cfg_train.get("SEED", 42))
+    k_folds = int(cfg_train.get("K_FOLDS", 2))
 
-    X_tune, y_tune, paths_tune, ids_tune, _ = filtrar_por_classes(
-        X_train_feat_t, y_train_t, classes_modelo,
-        paths=p_train_t, ids=id_train_t, idx_global=None
+    # No treino, o holdout final é por-classe; aqui usamos como test_frac (reconstrução)
+    test_frac = float(cfg_train.get("FINAL_TEST_FRACTION_PER_CLASS", 0.2))
+
+    conf = {
+        "dataset_path": str(dataset_path),
+        "test_frac": test_frac,
+        "seed_split": seed_split,
+        "min_amostras_por_classe": k_folds,  # mesma ideia do original: evitar classes muito pequenas
+        "frac_classes": float(SCRIPT_CONFIG.get("frac_classes", 1.0)),
+        "seed_classes": int(cfg_train.get("SEED", 42) + 17),
+        "min_train_por_classe": k_folds,
+        "k_folds": k_folds,
+    }
+
+    # Normalização usada no treino (ImageNet por padrão)
+    norm_mean = np.asarray(cfg_train.get("NORM_MEAN", [0.485, 0.456, 0.406]), dtype=np.float32)
+    norm_std = np.asarray(cfg_train.get("NORM_STD", [0.229, 0.224, 0.225]), dtype=np.float32)
+    standardizer = {"mean": norm_mean, "std": norm_std}
+
+    inference_params = {
+        "batch_size": int(cfg_train.get("BATCH_SIZE", 64)),
+        "embedding_layer_name": str(SCRIPT_CONFIG.get("embedding_layer_name", "dense")),
+        "img_size": int(cfg_train.get("IMG_SIZE", 128)),
+        "channels": int(cfg_train.get("IN_CHANNELS", 3)),
+        "assume_ingested_size": bool(cfg_train.get("ASSUME_INGESTED_SIZE", True)),
+        "jpeg_dct_method": str(cfg_train.get("JPEG_DCT_METHOD", "INTEGER_FAST")),
+        "norm_mean": norm_mean.tolist(),
+        "norm_std": norm_std.tolist(),
+    }
+
+    # ------------------------------------------------------------
+    # Carregar dataset e construir splits (eval + tune) como no original
+    # ------------------------------------------------------------
+    X, y, meta = carregar_dataset_joblib(str(dataset_path), label2idx=label2idx)
+
+    paths = meta.get("paths", None)
+    ids = meta.get("ids", None)
+
+    if paths is not None:
+        paths = np.asarray(paths)
+    if ids is not None:
+        ids = np.asarray(ids)
+
+    X_eval, y_eval, paths_eval, ids_eval = build_eval_split_from_payload(
+        X=X,
+        y=y,
+        paths=paths,
+        ids=ids,
+        conf=conf,
+        standardizer=standardizer,
+        classes_modelo=classes_modelo,
     )
 
-    print("  X_tune:", tuple(X_tune.shape), X_tune.dtype)
-    print("  y_tune:", tuple(y_tune.shape), y_tune.dtype, "| classes_present:", int(np.unique(y_tune).size))
+    # Reconstrução do conjunto de "tuning" (mesma lógica do original)
+    idx_global = np.arange(y.size, dtype=np.int64)
 
+    classes_elig = selecionar_classes_elegiveis(y, conf["min_amostras_por_classe"])
+    classes_sel = amostrar_classes(classes_elig, conf["frac_classes"], conf["seed_classes"])
 
+    X1, y1, p1, id1, idx1 = filtrar_por_classes(X, y, classes_sel, paths, ids, idx_global)
+
+    idx_train_all, idx_test_all = train_test_split(
+        idx1,
+        test_size=conf["test_frac"],
+        random_state=conf["seed_split"],
+        stratify=y1,
+    )
+
+    mask_train_all = np.isin(idx1, idx_train_all)
+    X_train_all = X1[mask_train_all]
+    y_train_all = y1[mask_train_all]
+    p_train_all = p1[mask_train_all] if p1 is not None else None
+    id_train_all = id1[mask_train_all] if id1 is not None else None
+
+    cls, cts = np.unique(y_train_all, return_counts=True)
+    cls_keep = cls[cts >= conf["min_train_por_classe"]]
+    X_train_t, y_train_t, p_train_t, id_train_t, _ = filtrar_por_classes(
+        X_train_all, y_train_all, cls_keep, p_train_all, id_train_all, None
+    )
+
+    X_train_feat_t = apply_standardizer(X_train_t, norm_mean, norm_std)
+    X_tune, y_tune, paths_tune, ids_tune, _ = filtrar_por_classes(
+        X_train_feat_t, y_train_t, classes_modelo, p_train_t, id_train_t, None
+    )
+
+    # Evitar 'padronização' dupla: se X_tune é caminho, apply_standardizer devolve o próprio X.
+    # Para o caso CNN, a normalização acontece em mlp_forward_inference via tf.data (usando inference_params).
     # =========================
     # IDENTIFICAÇÃO (multiclasse)
     # =========================
@@ -1770,7 +2059,7 @@ class _Tee(io.TextIOBase):
                 pass
 
 def _run_with_output_log(main_func, log_prefix="cnn_ident_auth_eval"):
-    out_dir = (Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd())
+    out_dir = _resolve_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
