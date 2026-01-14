@@ -225,8 +225,8 @@ CONFIG: Dict[str, Any] = {
 
     # NOVO: salvar modelo final + pesos txt ao final
     "SAVE_FINAL_MODEL": True,
-    "FINAL_MODEL_FILENAME": "final_model_best.keras",
-    "FINAL_WEIGHTS_TXT_FILENAME": "final_model_best_weights.txt",
+    "FINAL_MODEL_FILENAME": "final_model_resnet_best.keras",
+    "FINAL_WEIGHTS_TXT_FILENAME": "final_model_resnet_best_weights.txt",
 
     # --------------------------------------------------------
     # (2) NOVO: FORÇAR GPU / CPU (opcional) - sem mexer no resto
@@ -1789,8 +1789,8 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
             models_dir = run_dir / "models"
             ensure_dir(models_dir)
 
-            final_model_path = models_dir / str(cfg.get("FINAL_MODEL_FILENAME", "final_model_best.keras"))
-            final_weights_txt = models_dir / str(cfg.get("FINAL_WEIGHTS_TXT_FILENAME", "final_model_best_weights.txt"))
+            final_model_path = models_dir / str(cfg.get("FINAL_MODEL_FILENAME", "final_model_resnet_best.keras"))
+            final_weights_txt = models_dir / str(cfg.get("FINAL_WEIGHTS_TXT_FILENAME", "final_model_resnet_best_weights.txt"))
 
             final_model.save(final_model_path)
             print(f"[SAVED] {final_model_path}")

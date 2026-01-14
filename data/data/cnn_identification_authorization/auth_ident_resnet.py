@@ -59,7 +59,7 @@ def load_json(path: str) -> Dict[str, Any]:
 
 SCRIPT_CONFIG = {
     # nome do arquivo salvo pelo script de treino (dentro do run_dir)
-    "model_payload_file": "models/final_model_best.keras",
+    "model_payload_file": "models/final_model_resnet_best.keras",
 
     # opcional: apontar diretamente para um run_dir específico (onde estão hyperparameters.json, label2idx.json, models/)
     # se None, o script tentará auto-detectar o run mais recente em ./celeba_rgb_128x128/runs/ e vizinhança.
@@ -1450,7 +1450,7 @@ def main():
     # Resolução do run_dir (para salvar outputs junto do treino)
     # ------------------------------------------------------------
     script_dir = Path(__file__).resolve().parent
-    model_payload_file = str(SCRIPT_CONFIG.get("model_payload_file", "models/final_model_best.keras"))
+    model_payload_file = str(SCRIPT_CONFIG.get("model_payload_file", "models/final_model_resnet_best.keras"))
 
     def _detect_latest_run_dir(base: Path) -> Optional[Path]:
         candidates: List[Path] = []
