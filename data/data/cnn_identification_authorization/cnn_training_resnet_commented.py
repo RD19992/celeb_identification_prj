@@ -4,14 +4,7 @@ EACH_USP: SIN-5016 - Aprendizado de Máquina
 Laura Silva Pelicer
 Renan Rios Diniz
 
-Treinamento de CNN (ResNet "explicit") com K-Fold CV (sem sklearn).
-
-VERSÃO OTIMIZADA (GPU):
-- tf.data mais rápido (decode JPEG rápido, resize opcional, non-deterministic opcional)
-- mixed precision (opcional)
-- XLA/jit_compile nos passos de treino/val (opcional)
-- contadores/telemetria por step (para debugar CV)
-- confirmação da resolução REAL ingerida (sem resize), por amostragem
+Treinamento de CNN ResNet "explicit" com K-Fold CV.
 
 Arquivos gerados (por execução), dentro de:
   <DATASET_DIR>/runs/<YYYYMMDD_HHMMSS>/
@@ -23,43 +16,11 @@ Arquivos gerados (por execução), dentro de:
 - [opcional] models/*.keras (salvo apenas se SAVE_MODEL=True)
 
 Obs.: SAVE_MODEL começa DESABILITADO por padrão.
-
-------------------------------------------------------------
-AJUSTES PEDIDOS (SEM ALTERAR HIPERPARÂMETROS/LÓGICA):
-1) Comentários didáticos PT-BR em cada etapa.
-2) Opção configurável para forçar GPU (e opcionalmente falhar se não houver).
-3) Pós-treino: avaliação em "teste" (aqui: validação do melhor fold do CV),
-   erro, 10 exemplos aleatórios e matriz de confusão one-vs-all desses 10.
-------------------------------------------------------------
-
-------------------------------------------------------------
-NOVOS AJUSTES PEDIDOS (mantendo funcionalidades existentes):
-1) Definir um conjunto FINAL de teste, com % de classes configurável na seção de configuração.
-   - Aqui, "percentual de classes" = fração das classes (identidades) que terão imagens reservadas
-     para um TESTE FINAL (hold-out), ANTES do CV.
-   - Para cada classe escolhida, reservamos uma fração de imagens (FINAL_TEST_FRACTION_PER_CLASS),
-     garantindo que sobrem pelo menos KFOLDS exemplos para o CV daquela classe.
-2) Usar o melhor modelo treinado no CV para uso no conjunto de teste, com números de épocas
-   configuráveis separados para CV e treino final.
-   - Fluxo: CV em cv_df -> pega melhor fold/época -> usa esses pesos como inicialização
-     para um treino final (com val interno) -> avalia no TESTE FINAL.
-3) Early stopping de épocas para ambos (CV e treino final), com paciência 5 inicial.
-4) No final além de salvar o modelo salve também um txt com os pesos do melhor modelo.
-5) No Adam use um learning schedule, configurável.
-------------------------------------------------------------
 """
 # ================================================================================
-# ANOTAÇÕES DIDÁTICAS + ATRIBUIÇÃO ACADÊMICA (somente comentários; lógica inalterada)
-# -------------------------------------------------------------------------------
-# Este arquivo foi mantido funcionalmente idêntico ao original: as únicas adições
-# são comentários explicativos e marcações de referências (tags como [He2016]).
-# A ideia é facilitar: (i) entendimento; (ii) rastreio de propriedade intelectual
-# e origem de escolhas comuns (ResNet, BN, Adam, cosine LR, etc.).
-#
-# Convenção: quando você vir [Tag], procure a entrada correspondente no bloco
-# 'REFERÊNCIAS (tags -> fonte curta)' mais abaixo (ou na lista de referências no chat).
-# ================================================================================
 # REFERÊNCIAS (tags -> fonte curta)
+# -------------------------------------------------------------------------------
+
 #   [He2016] He et al., 2016 — Deep Residual Learning for Image Recognition (ResNet).
 #   [Ioffe2015] Ioffe & Szegedy, 2015 — Batch Normalization.
 #   [Nair2010] Nair & Hinton, 2010 — ReLU (popularização moderna).
@@ -90,26 +51,20 @@ import math
 import random
 import time
 from typing import Dict, Tuple, List, Any, Optional, Set
-
 import numpy as np
 import pandas as pd
 import os
-
-# ============================================================
-# (1) SELEÇÃO DE ADAPTADOR / BACKEND (DirectML-friendly)
-# ============================================================
-# Este env var é típico do plugin DirectML: você pode "esconder"
-# outros adaptadores e deixar só o índice 0 visível.
-# (Mantido como estava, só comentado.)
-os.environ["DML_VISIBLE_DEVICES"] = "0"  # mantém apenas o adapter 0 (ex.: GPU discreta)
-
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 from tensorflow.keras import mixed_precision
 
-# Por padrão, você está fixando a política global em float32.
-# Isso evita surpresas de dtype e costuma ser mais estável em ambientes variados.
-# (Mantido como estava.)
+
+# ============================================================
+# (1) SELEÇÃO DE ADAPTADOR / BACKEND (DirectML-friendly)
+# ============================================================
+
+os.environ["DML_VISIBLE_DEVICES"] = "0"  # mantém apenas o adapter 0 (ex.: GPU)
+
 mixed_precision.set_global_policy("float32")
 
 # >>> Logar onde cada op é colocado (CPU/GPU)
@@ -133,14 +88,14 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes (mantido)
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
     # K-fold cross-validation [Kohavi1995][Stone1974].
     "KFOLDS": 2,
     # Seed p/ reprodutibilidade; ver boas práticas em [Goodfellow2016].
     "SEED": 42,
 
     # --------------------------------------------------------
-    # NOVO: Split de TESTE FINAL (hold-out ANTES do CV)
+    # Split de TESTE FINAL (hold-out ANTES do CV)
     # --------------------------------------------------------
     # Fração de classes (identidades) que participarão do teste final.
     # 1.0 => todas as classes elegíveis terão um pedaço reservado para teste.
@@ -153,7 +108,7 @@ CONFIG: Dict[str, Any] = {
     # Fraç. de imagens reservadas por classe p/ hold-out [Goodfellow2016].
     "FINAL_TEST_FRACTION_PER_CLASS": 0.20,
 
-    # NOVO: Para o treino final (antes do teste), separamos uma validação interna
+    # Para o treino final (antes do teste), separamos uma validação interna
     # (para early stopping do treino final), por classe.
     "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.20,
 
@@ -168,18 +123,18 @@ CONFIG: Dict[str, Any] = {
     "NORM_STD":  (0.229, 0.224, 0.225),
 
     # --------------------------------------------------------
-    # Aumentação de dados (explícita, mínima)
+    # Aumentação de dados
     # --------------------------------------------------------
     "AUG_HFLIP": True,
     "AUG_PAD": 4,                    # reflect-pad + random crop; 0 desabilita
 
     # --------------------------------------------------------
-    # ResNet mínima (explícita)
+    # ResNet - parâmetros de configuração da arqutetura
     # --------------------------------------------------------
     # Profundidade (nº de blocos por estágio). Aumentar profundidade é motivação da ResNet [He2016].
-    "RES_LAYERS": [1, 1, 1, 2, 2, 2],          # blocks por estágio
+    "RES_LAYERS": [1, 1, 1, 2, 2, 2, 2],          # blocks por estágio
     # Largura (nº de filtros/canais por estágio). Mais largura = mais capacidade [Goodfellow2016].
-    "RES_CHANNELS": [48, 64, 80, 96, 112, 128],    # largura (canais) por estágio
+    "RES_CHANNELS": [32, 48, 64, 80, 96, 112, 128],    # largura (canais) por estágio
     # Batch Normalization para estabilizar treino [Ioffe2015].
     "USE_BN": True,                  # BatchNorm (normalização em batch)
     # ReLU como ativação padrão [Nair2010][Kaiming2015].
@@ -201,24 +156,22 @@ CONFIG: Dict[str, Any] = {
     # Batch size afeta ruído do gradiente e generalização; trade-off clássico [Goodfellow2016].
     "BATCH_SIZE": 16,
 
-    # Mantemos o campo antigo por compatibilidade mental com seu script,
-    # mas agora você tem épocas separadas para CV e treino final.
     # Número máximo de épocas (limite superior).
-    "EPOCHS": 50,                     # (mantido) - serve como default
+    "EPOCHS": 50,                     # serve como default
 
     # Épocas máximas por fold; validação cruzada (CV) [Kohavi1995].
-    "EPOCHS_CV": 20,                  # NOVO: max épocas por fold no CV
+    "EPOCHS_CV": 20,                  # max épocas por fold no CV
     # Treino final após escolher melhor modelo por CV; prática comum [Goodfellow2016].
-    "EPOCHS_FINAL": 30,               # NOVO: max épocas do treino final (antes do teste final)
+    "EPOCHS_FINAL": 30,               # max épocas do treino final (antes do teste final)
 
-    # LR base (mantido), agora usado como "initial_lr" do schedule (se habilitado).
+    # LR base, agora usado como "initial_lr" do schedule (se habilitado).
     # Learning rate base; hiperparâmetro de maior impacto na otimização [Goodfellow2016].
     "LR": 3e-4,
 
     # --------------------------------------------------------
-    # NOVO: Early stopping
+    # Early stopping
     # --------------------------------------------------------
-    # Se quiser desligar, coloque 0.
+    # Para desligar, colocar 0.
     # Early stopping (paciência) no CV [Prechelt1998][Goodfellow2016].
     "EARLY_STOPPING_PATIENCE_CV": 5,
     # Early stopping no treino final [Prechelt1998].
@@ -227,10 +180,10 @@ CONFIG: Dict[str, Any] = {
     "EARLY_STOPPING_MIN_DELTA": 0.0001,   # melhora mínima exigida (em termos de val_err)
 
     # --------------------------------------------------------
-    # NOVO: Learning-rate schedule (Adam)
+    # Learning-rate schedule (Adam)
     # --------------------------------------------------------
     # TYPE:
-    # - "constant" (mantém LR fixa igual ao seu script)
+    # - "constant"
     # - "exponential_decay"
     # - "cosine_decay"
     # - "cosine_decay_restarts"
@@ -273,7 +226,7 @@ CONFIG: Dict[str, Any] = {
     "JPEG_DCT_METHOD": "INTEGER_FAST",  # "INTEGER_FAST" ou "INTEGER_ACCURATE"
 
     # Mixed precision / XLA
-    "MIXED_PRECISION": False,          # tente True; se backend for "chato", deixe False
+    "MIXED_PRECISION": False,
     "XLA": False,                      # jit_compile=True nos passos
     "ALLOW_TF32": False,               # CUDA Ampere+: acelera matmul com TF32
 
@@ -287,15 +240,15 @@ CONFIG: Dict[str, Any] = {
 
     # Saídas
     "RUNS_DIRNAME": "runs",
-    "SAVE_MODEL": False,              # começa desabilitado (mantido) - salva modelos por fold no CV
+    "SAVE_MODEL": False,              # começa desabilitado - salva modelos por fold no CV
 
-    # NOVO: salvar modelo final + pesos txt ao final
+    # salvar modelo final + pesos txt ao final
     "SAVE_FINAL_MODEL": True,
     "FINAL_MODEL_FILENAME": "final_model_resnet_best.keras",
     "FINAL_WEIGHTS_TXT_FILENAME": "final_model_resnet_best_weights.txt",
 
     # --------------------------------------------------------
-    # (2) NOVO: FORÇAR GPU / CPU (opcional) - sem mexer no resto
+    # (2) FORÇAR GPU / CPU (opcional)
     # --------------------------------------------------------
     # Se FORCE_GPU=True, tentamos travar o runtime para usar /GPU:0.
     # Se FORCE_GPU_STRICT=True e não houver GPU, levantamos erro.
@@ -305,21 +258,15 @@ CONFIG: Dict[str, Any] = {
     # Opcional: forçar CPU (útil para debug/comparação)
     "FORCE_CPU": False,
 
-    # Opcional: diagnóstico (não altera lógica; só imprime)
+    # Opcional: diagnóstico
     "PRINT_DEVICE_DIAGNOSTICS": True,
 }
-
-# Observação importante:
-# - CONFIG["DEVICE"] será definido *depois* que configurarmos os dispositivos,
-#   para respeitar FORCE_GPU/FORCE_CPU. Isso não muda os hiperparâmetros nem
-#   a lógica do treino; só controla onde o TF tenta alocar operações.
-
 
 # ============================================================
 # GPU/CPU SETUP (com opção de "forçar" GPU)
 # ============================================================
 def _print_visible_devices() -> None:
-    """Imprime dispositivos visíveis (útil para diagnosticar 'estou caindo na CPU')."""
+    """Imprime dispositivos visíveis"""
     try:
         vis = tf.config.get_visible_devices()
         print("[DBG] Visible devices:")
@@ -393,7 +340,7 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
 
         return "/GPU:0"
 
-    # Comportamento padrão (igual ao seu original): usa GPU se existir, senão CPU.
+    # Comportamento padrão: usa GPU se existir, senão CPU.
     if gpus:
         try:
             tf.config.set_visible_devices(gpus[0], "GPU")
@@ -409,7 +356,7 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
     return "/CPU:0"
 
 
-# Configura e grava o device escolhido no CONFIG (sem mexer em hiperparâmetros)
+# Configura e grava o device escolhido no CONFIG
 CONFIG["DEVICE"] = configure_devices(CONFIG)
 
 if bool(CONFIG.get("PRINT_DEVICE_DIAGNOSTICS", True)):
@@ -533,7 +480,7 @@ def confirm_image_resolution(df: pd.DataFrame, cfg: Dict[str, Any], sample_n: Op
 
 
 # =========================
-# NOVO: SPLITS ESTRATIFICADOS (por classe) PARA HOLD-OUT
+# SPLITS ESTRATIFICADOS (por classe) PARA HOLD-OUT
 # =========================
 def _pick_holdout_classes(
     ys: List[int],
@@ -595,7 +542,7 @@ def stratified_holdout_split_by_class(
         if len(grp_idx) <= min_keep_per_class:
             continue
 
-        # RNG por classe para manter reproduzibilidade e evitar correlação esquisita
+        # RNG por classe para manter reproduzibilidade e evitar correlação
         rng = np.random.default_rng(int(cfg["SEED"]) + int(seed_offset) + 10007 * int(y))
         rng.shuffle(grp_idx)
 
@@ -607,7 +554,7 @@ def stratified_holdout_split_by_class(
 
         n_hold = min(max_allowed, desired)
 
-        # Se a pessoa pediu fração > 0 mas o arredondamento deu 0,
+        # Se pedir fração > 0 mas o arredondamento deu 0,
         # tentamos tirar 1 (desde que não viole o min_keep_per_class).
         if desired == 0 and holdout_fraction_per_class > 0.0 and max_allowed > 0:
             n_hold = 1
@@ -763,11 +710,10 @@ def make_stage(
     Um "estágio" da ResNet = sequência de BasicBlocks com mesma largura (filters),
     onde o primeiro bloco do estágio pode fazer downsample (first_stride=2).
 
-    Didática: como "escalar" a ResNet sem mudar a lógica:
+    Didática: como "escalar" a ResNet:
     - Mais profundidade: aumente RES_LAYERS (mais blocos por estágio).
     - Mais largura: aumente RES_CHANNELS (mais filters por estágio).
     - Mais estágios: estender listas RES_LAYERS/RES_CHANNELS (ex.: adicionar stage4).
-    Observação: aqui manteremos exatamente os valores do seu CONFIG.
     """
     x = basic_res_block(
         x, filters=filters, stride=first_stride,
@@ -791,11 +737,6 @@ def build_min_resnet(cfg: Dict[str, Any], num_classes: int) -> Model:
     """
     Minimal ResNet (explicit):
       stem -> stages -> GAP -> Dense(logits)
-
-    Explicação do "stem" (arquitetura inicial):
-    - Em ResNets maiores, o stem costuma ser algo como 7x7 stride 2 + maxpool.
-    - Aqui vocês usam um stem minimalista: Conv 3x3 stride 1.
-      Isso mantém resolução e reduz complexidade (bom para IMG_SIZE pequeno).
 
     GAP (GlobalAveragePooling2D):
     - Em vez de flattenar tudo (muitos parâmetros), faz média por canal.
@@ -847,7 +788,7 @@ def build_min_resnet(cfg: Dict[str, Any], num_classes: int) -> Model:
 
 
 # =========================
-# DATA LOADING + STRATIFIED KFOLD (NO SKLEARN)
+# DATA LOADING + STRATIFIED KFOLD
 # =========================
 def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[int, int]]:
     """
@@ -915,7 +856,7 @@ def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[in
 
 def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
-    K-Fold estratificado (sem sklearn):
+    K-Fold estratificado:
     - Para cada classe y: embaralha índices e divide em k "chunks".
     - Fold i: validação = chunk i de cada classe; treino = resto.
 
@@ -941,7 +882,7 @@ def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[
 
 
 # =========================
-# TF.DATA PIPELINE (FAST)
+# TF.DATA PIPELINE
 # =========================
 def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
     """
@@ -1045,7 +986,7 @@ def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: in
       total_steps ~= steps_per_epoch * epochs
 
     Tipos implementados:
-    - constant (igual ao script antigo)
+    - constant
     - exponential_decay
     - cosine_decay
     - cosine_decay_restarts
@@ -1102,8 +1043,8 @@ def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: in
 # Adam é um otimizador adaptativo amplamente usado [KingmaBa2015].
 def make_optimizer(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     """
-    Otimizador Adam (mantido), agora com learning-rate schedule configurável (NOVO).
-    Se MIXED_PRECISION=True, encapsula com LossScaleOptimizer (mantido).
+    Otimizador Adam, agora com learning-rate schedule configurável.
+    Se MIXED_PRECISION=True, encapsula com LossScaleOptimizer.
     """
     lr = make_learning_rate(cfg, steps_per_epoch=steps_per_epoch, epochs_max=epochs_max)
     opt = tf.keras.optimizers.Adam(learning_rate=lr)
@@ -1126,7 +1067,7 @@ def make_loss():
 
 
 # =========================
-# TRAIN / EVAL (FAST + COUNTERS)
+# TRAIN / EVAL
 # =========================
 def train_one_epoch(
     model: Model,
@@ -1167,7 +1108,7 @@ def train_one_epoch(
 
             loss = base_loss + reg_loss
 
-        # Mixed precision loss scaling (mantido)
+        # Mixed precision loss scaling
         if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer) or (
                 hasattr(optimizer, "get_scaled_loss") and hasattr(optimizer, "get_unscaled_gradients")
         ):
@@ -1177,7 +1118,7 @@ def train_one_epoch(
         else:
             grads = tape.gradient(loss, model.trainable_variables)
 
-        # Filtra gradientes None (mantido)
+        # Filtra gradientes None
         grads_and_vars = [(g, v) for (g, v) in zip(grads, model.trainable_variables) if g is not None]
         if not grads_and_vars:
             raise RuntimeError(
@@ -1208,7 +1149,7 @@ def train_one_epoch(
         total_correct += int(correct.numpy())
         total_seen += bn
 
-        # Debug do primeiro batch (muito útil para ver device/dtype)
+        # Debug do primeiro batch
         if bool(cfg.get("PRINT_FIRST_BATCH_INFO", True)) and not first_batch_printed:
             first_batch_printed = True
             try:
@@ -1291,7 +1232,7 @@ def _preprocess_single_image(path: str, cfg: Dict[str, Any]) -> tf.Tensor:
     Carrega 1 imagem e aplica exatamente o mesmo pré-processamento do pipeline de avaliação
     (sem augment), retornando tensor [H,W,C] float32 normalizado.
 
-    Mantemos a mesma sequência:
+    Sequência:
     decode_jpeg -> convert_image_dtype -> (ensure_shape ou resize) -> normalize
     """
     img_size = int(cfg["IMG_SIZE"])
@@ -1355,12 +1296,12 @@ def post_training_test_report(
     - Imprime erro/acc/loss e mostra 10 exemplos aleatórios com predições.
     - Gera matriz one-vs-all para esses 10 exemplos.
 
-    Observação didática (mantida):
+    Observação didática:
     - Em K-Fold CV, não existe um test set único por padrão.
-      O mais honesto, sem mudar sua lógica, é tratar o fold segurado (val) como "teste"
+      O mais honesto é tratar o fold segurado (val) como "teste"
       do melhor fold (held-out).
 
-    NOVO: agora também pode ser usado com um TESTE FINAL real (hold-out antes do CV),
+    Pode ser usado com um TESTE FINAL real (hold-out antes do CV),
     mantendo a mesma lógica de relatório.
     """
     print("\n" + "=" * 80)
@@ -1453,7 +1394,7 @@ def post_training_test_report(
 
 
 # =========================
-# NOVO: salvar pesos em TXT
+# Salvar pesos em TXT
 # =========================
 def save_model_weights_txt(model: Model, path: Path) -> None:
     """
@@ -1501,11 +1442,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     """
     Executa K-Fold CV e grava arquivos de log.
     Retorna: (cv_mean_best_val_err, run_dir)
-
-    Além disso (ajuste pedido):
     - Guarda o "melhor fold" (menor val_err) e faz um relatório final nele.
-
-    NOVO:
     - Antes do CV, cria um TESTE FINAL (hold-out) com % de classes configurável.
     - Após o CV, usa o melhor modelo do CV como inicialização e faz um treino final
       (com val interno + early stopping) e avalia no TESTE FINAL.
@@ -1519,7 +1456,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     confirm_image_resolution(df_full, cfg)
 
     # --------------------------------------------------------
-    # NOVO: split TESTE FINAL antes do CV
+    # Split TESTE FINAL antes do CV
     # --------------------------------------------------------
     cv_df, final_test_df, test_classes = stratified_holdout_split_by_class(
         df=df_full,
@@ -1545,7 +1482,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         print(f"[INFO] final_test classes presentes={final_test_df['y'].nunique()}")
 
     # --------------------------------------------------------
-    # CV propriamente dito (agora em cima de cv_df)
+    # CV propriamente dito (em cima de cv_df)
     # --------------------------------------------------------
     k = int(cfg["KFOLDS"])
     folds = stratified_kfold_indices(cv_df, k=k, seed=int(cfg["SEED"]))
@@ -1571,7 +1508,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         fold_summaries = []
         best_val_errs = []
 
-        # Ajuste pedido: guardar o melhor fold global para "teste" final
+        # Guardar o melhor fold global para "teste" final
         best_global_val_err = float("inf")
         best_global_weights: Optional[List[np.ndarray]] = None
         best_global_val_df: Optional[pd.DataFrame] = None
@@ -1599,7 +1536,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
             with tf.device(cfg["DEVICE"]):
                 model = build_min_resnet(cfg, num_classes=num_classes)
 
-            # NOVO: optimizer agora recebe steps_per_epoch e epochs_max (para o schedule)
+            # Optimizer recebe steps_per_epoch e epochs_max (para o schedule)
             steps_per_epoch = int(math.ceil(len(train_df) / max(1, int(cfg["BATCH_SIZE"]))))
             optimizer = make_optimizer(cfg, steps_per_epoch=steps_per_epoch, epochs_max=epochs_cv)
 
@@ -1661,7 +1598,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
                 "best_val_err": best_val_err,
             })
 
-            # Guarda o melhor fold global para o relatório final (ajuste pedido)
+            # Guarda o melhor fold global para o relatório final
             if best_val_err < best_global_val_err and best_weights is not None:
                 best_global_val_err = float(best_val_err)
                 best_global_weights = best_weights
@@ -1709,7 +1646,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     print(f"[FILES] {run_dir}")
 
     # --------------------------------------------------------
-    # Ajuste antigo (3): relatório final no melhor fold (val como "teste")
+    # Relatório final no melhor fold (val como "teste")
     # --------------------------------------------------------
     try:
         if best_global_weights is not None and best_global_val_df is not None:
@@ -1729,7 +1666,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         print("[WARN] Post-training report failed:", e)
 
     # --------------------------------------------------------
-    # NOVO: TREINO FINAL (inicializa com melhor modelo do CV) + TESTE FINAL
+    # TREINO FINAL (inicializa com melhor modelo do CV) + TESTE FINAL
     # --------------------------------------------------------
     try:
         if best_global_weights is None:
@@ -1868,7 +1805,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         except Exception as e:
             print("[WARN] post_training_test_report on FINAL TEST failed:", e)
 
-        # Salvar modelo final + pesos txt (pedido)
+        # Salvar modelo final + pesos txt
         if bool(cfg.get("SAVE_FINAL_MODEL", True)):
             models_dir = run_dir / "models"
             ensure_dir(models_dir)
