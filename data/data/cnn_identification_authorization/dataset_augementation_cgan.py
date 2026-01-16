@@ -57,6 +57,8 @@ import tensorflow as tf
 # 1) CONFIGURAÇÕES
 # =============================================================================
 
+HERE = Path(__file__).resolve().parent
+
 @dataclass
 class CganConfig:
     # -------------------------
