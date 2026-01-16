@@ -4,14 +4,7 @@ EACH_USP: SIN-5016 - Aprendizado de Máquina
 Laura Silva Pelicer
 Renan Rios Diniz
 
-Treinamento de CNN tradicional (by the book) com K-Fold CV (sem sklearn).
-
-VERSÃO OTIMIZADA (GPU):
-- tf.data mais rápido (decode JPEG rápido, resize opcional, non-deterministic opcional)
-- mixed precision (opcional)
-- XLA/jit_compile nos passos de treino/val (opcional)
-- contadores/telemetria por step (para debugar CV)
-- confirmação da resolução REAL ingerida (sem resize), por amostragem
+Treinamento de CNN tradicional com K-Fold CV
 
 Arquivos gerados (por execução), dentro de:
   <DATASET_DIR>/runs/<YYYYMMDD_HHMMSS>/
@@ -22,30 +15,8 @@ Arquivos gerados (por execução), dentro de:
 - label2idx.json            (mapeamento label_original -> y_reindexado)
 - [opcional] models/*.keras (salvo apenas se SAVE_MODEL=True)
 
-Obs.: SAVE_MODEL começa DESABILITADO por padrão.
 
-------------------------------------------------------------
-AJUSTES PEDIDOS (SEM ALTERAR HIPERPARÂMETROS/LÓGICA):
-1) Comentários didáticos PT-BR em cada etapa.
-2) Opção configurável para forçar GPU (e opcionalmente falhar se não houver).
-3) Pós-treino: avaliação em "teste" (aqui: validação do melhor fold do CV),
-   erro, 10 exemplos aleatórios e matriz de confusão one-vs-all desses 10.
-------------------------------------------------------------
 
-------------------------------------------------------------
-NOVOS AJUSTES PEDIDOS (mantendo funcionalidades existentes):
-1) Definir um conjunto FINAL de teste, com % de classes configurável na seção de configuração.
-   - Aqui, "percentual de classes" = fração das classes (identidades) que terão imagens reservadas
-     para um TESTE FINAL (hold-out), ANTES do CV.
-   - Para cada classe escolhida, reservamos uma fração de imagens (FINAL_TEST_FRACTION_PER_CLASS),
-     garantindo que sobrem pelo menos KFOLDS exemplos para o CV daquela classe.
-2) Usar o melhor modelo treinado no CV para uso no conjunto de teste, com números de épocas
-   configuráveis separados para CV e treino final.
-   - Fluxo: CV em cv_df -> pega melhor fold/época -> usa esses pesos como inicialização
-     para um treino final (com val interno) -> avalia no TESTE FINAL.
-3) Early stopping de épocas para ambos (CV e treino final), com paciência 5 inicial.
-4) No final além de salvar o modelo salve também um txt com os pesos do melhor modelo.
-5) No Adam use um learning schedule, configurável.
 ------------------------------------------------------------
 """
 
@@ -59,44 +30,19 @@ import math
 import random
 import time
 from typing import Dict, Tuple, List, Any, Optional, Set
-
 import numpy as np
 import pandas as pd
 import os
-
-# ============================================================
-# (1) SELEÇÃO DE ADAPTADOR / BACKEND (DirectML-friendly)
-# ============================================================
-# Este env var é típico do plugin DirectML: você pode "esconder"
-# outros adaptadores e deixar só o índice 0 visível.
-# (Mantido como estava, só comentado.)
-os.environ["DML_VISIBLE_DEVICES"] = "0"  # mantém apenas o adapter 0 (ex.: GPU discreta)
-
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 from tensorflow.keras import mixed_precision
 
-# Por padrão, você está fixando a política global em float32.
-# Isso evita surpresas de dtype e costuma ser mais estável em ambientes variados.
-# (Mantido como estava.)
-mixed_precision.set_global_policy("float32")
-
-# >>> Logar onde cada op é colocado (CPU/GPU)
-tf.debugging.set_log_device_placement(False)
-
-
-# ============================================================
-# CONFIGURAÇÕES
-# ============================================================
-
 # ---------------------------------------------------------------------------
-# Notas acadêmicas (para citação / rastreabilidade de métodos)
+# Referências
 # ---------------------------------------------------------------------------
 # Este script é uma implementação prática de um pipeline de treino/validação
-# de CNNs em Keras/TensorFlow. A lógica é sua; abaixo eu adiciono COMENTÁRIOS
-# com referências clássicas para cada família de técnica.
-#
-# Referências-base (apelidos usados nos comentários):
+# de CNNs em Keras/TensorFlow.
+# Referências-base (citadas nos comentários):
 #  - [LeCun98] CNNs e conv/pooling na prática (LeCun et al., 1998)
 #  - [He15] ReLU/rectifiers e inicialização 'He' (He et al., 2015)
 #  - [Ioffe15] Batch Normalization (Ioffe & Szegedy, 2015)
@@ -109,12 +55,28 @@ tf.debugging.set_log_device_placement(False)
 #  - [Russakovsky15] ImageNet (contexto para mean/std e benchmarks)
 #  - [Shorten19] Data augmentation (survey)
 #  - [Micikevicius17] Mixed precision training (FP16/FP32 + loss scaling)
-#
-# Observação importante sobre “propriedade intelectual”:
-#  • Esses trabalhos estabelecem/explicam os MÉTODOS. O código aqui é
-#    uma instância de implementação (em TF/Keras) desses métodos.
-#  • Ao citar, você normalmente referencia o paper do método e a doc do
-#    framework (quando relevante para API/comportamento).
+
+
+# ============================================================
+# (1) SELEÇÃO DE ADAPTADOR / BACKEND (DirectML-friendly)
+# ============================================================
+
+os.environ["DML_VISIBLE_DEVICES"] = "0"  # mantém apenas o adapter 0 (GPU discreta)
+
+
+mixed_precision.set_global_policy("float32")
+
+# >>> Logar onde cada op é colocado (CPU/GPU)
+tf.debugging.set_log_device_placement(False)
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+
+
+
 # ---------------------------------------------------------------------------
 CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
@@ -127,12 +89,12 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes (mantido)
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
     "KFOLDS": 2,
     "SEED": 42,
 
     # --------------------------------------------------------
-    # NOVO: Split de TESTE FINAL (hold-out ANTES do CV)
+    # Split de TESTE FINAL (hold-out ANTES do CV)
     # --------------------------------------------------------
     # Fração de classes (identidades) que participarão do teste final.
     # 1.0 => todas as classes elegíveis terão um pedaço reservado para teste.
@@ -143,7 +105,7 @@ CONFIG: Dict[str, Any] = {
     # Importante: garantimos que sobrem pelo menos KFOLDS imagens no conjunto do CV para essa classe.
     "FINAL_TEST_FRACTION_PER_CLASS": 0.20,
 
-    # NOVO: Para o treino final (antes do teste), separamos uma validação interna
+    # Para o treino final (antes do teste), separamos uma validação interna
     # (para early stopping do treino final), por classe.
     "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.20,
 
@@ -152,7 +114,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
 
     # [LeCun98] define a motivação para operar em grades 2D (imagens) com
-    # convoluções e pooling; aqui você fixa resolução (IMG_SIZE) e canais.
+    # convoluções e pooling; fixar resolução (IMG_SIZE) e canais.
     # Normalização por média/desvio padrão é uma forma de padronização do input;
     # os valores abaixo são o padrão do ImageNet (muito usado em CV), cf. [Russakovsky15].
     "IMG_SIZE": 128,
@@ -161,7 +123,7 @@ CONFIG: Dict[str, Any] = {
     "NORM_STD":  (0.229, 0.224, 0.225),
 
     # --------------------------------------------------------
-    # Aumentação de dados (explícita, mínima)
+    # Aumentação de dados
     # --------------------------------------------------------
 
     # Aumentação (flip/crop/jitter etc.) age como regularização “no espaço dos dados”,
@@ -172,10 +134,9 @@ CONFIG: Dict[str, Any] = {
 
     # --------------------------------------------------------
     # --------------------------------------------------------
-    # CNN tradicional (by the book; exatamente como nos slides)
+    # CNN tradicional
     # --------------------------------------------------------
     # Camadas: Conv2D -> MaxPool -> Conv2D -> MaxPool -> Flatten -> Dense -> Dense(softmax)
-    # Obs: os valores default abaixo replicam o slide; você pode alterar via CONFIG.
     "CNN_CONV1_FILTERS": 32,
     "CNN_CONV1_KERNEL": (3, 3),
     "CNN_CONV1_STRIDES": (1, 1),
@@ -197,13 +158,13 @@ CONFIG: Dict[str, Any] = {
     "CNN_DENSE_UNITS": 64,
     "CNN_DENSE_ACTIVATION": "relu",
 
-    # Dropout opcional na "head" (não está no slide; default 0.0 para manter arquitetura idêntica)
+    # Dropout opcional na "head"
     "CNN_HEAD_DROPOUT": 0.3,
 
-    # Saída softmax (como no slide)
+    # Saída softmax
     "CNN_OUTPUT_ACTIVATION": "softmax",
 
-    # Perda (como no slide: categorical cross-entropy).
+    # Perda (categorical cross-entropy).
     # Em problemas com MUITAS classes, SparseCategoricalCrossentropy é equivalente e costuma ser mais eficiente.
     "USE_SPARSE_CE": False,
 
@@ -214,7 +175,7 @@ CONFIG: Dict[str, Any] = {
     # Regularização:
     #  - Dropout: desativa unidades aleatoriamente durante o treino para reduzir coadaptação
     #    e overfitting [Srivastava14].
-    #  - L2/weight decay: penaliza pesos grandes; há teoria e evidência empírica clássica em
+    #  - L2/weight decay: penaliza pesos grandes;
     #    [Krogh91] / [KroghHertz92].
     "L2_WEIGHT": 1e-4,                # L2 no kernel de Conv/Dense
 
@@ -223,36 +184,34 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     "BATCH_SIZE": 16,
 
-    # Mantemos o campo antigo por compatibilidade mental com seu script,
-    # mas agora você tem épocas separadas para CV e treino final.
-    "EPOCHS": 50,                     # (mantido) - serve como default
+    "EPOCHS": 50,                     # - serve como default
 
-    "EPOCHS_CV": 20,                  # NOVO: max épocas por fold no CV
-    "EPOCHS_FINAL": 30,               # NOVO: max épocas do treino final (antes do teste final)
+    "EPOCHS_CV": 20,                  # max épocas por fold no CV
+    "EPOCHS_FINAL": 30,               # max épocas do treino final (antes do teste final)
 
-    # LR base (mantido), agora usado como "initial_lr" do schedule (se habilitado).
+    # LR base, usado como "initial_lr" do schedule (se habilitado).
     "LR": 3e-4,
 
     # --------------------------------------------------------
-    # NOVO: Early stopping
+    # Early stopping
     # --------------------------------------------------------
 
     # Early stopping interrompe o treino quando a métrica de validação para de melhorar,
     # reduzindo overfitting e economizando compute. Critérios/prática em [Prechelt97].
-    # Se quiser desligar, coloque 0.
+    # Desligar, colocar 0.
     "EARLY_STOPPING_PATIENCE_CV": 5,
     "EARLY_STOPPING_PATIENCE_FINAL": 10,
     "EARLY_STOPPING_MIN_DELTA": 0.0001,   # melhora mínima exigida (em termos de val_err)
 
     # --------------------------------------------------------
-    # NOVO: Learning-rate schedule (Adam)
+    # Learning-rate schedule (Adam)
     # --------------------------------------------------------
 
     # Schedules de LR (decay/cosine/warm restarts) controlam o “tamanho do passo” ao longo
     # do treino e costumam ser uma das alavancas mais fortes para convergência e generalização.
     # Cosine annealing + warm restarts popularizou-se com SGDR [LoshchilovHutter16].
     # TYPE:
-    # - "constant" (mantém LR fixa igual ao seu script)
+    # - "constant"
     # - "exponential_decay"
     # - "cosine_decay"
     # - "cosine_decay_restarts"
@@ -284,7 +243,7 @@ CONFIG: Dict[str, Any] = {
     "JPEG_DCT_METHOD": "INTEGER_FAST",  # "INTEGER_FAST" ou "INTEGER_ACCURATE"
 
     # Mixed precision / XLA
-    "MIXED_PRECISION": False,          # tente True; se backend for "chato", deixe False
+    "MIXED_PRECISION": False,
     "XLA": False,                      # jit_compile=True nos passos
     "ALLOW_TF32": False,               # CUDA Ampere+: acelera matmul com TF32
 
@@ -292,7 +251,7 @@ CONFIG: Dict[str, Any] = {
     "LOG_EVERY_N_STEPS": 50,
     "PRINT_FIRST_BATCH_INFO": True,
 
-    # Relatórios (slides): matriz de confusão no conjunto de teste
+    # Matriz de confusão no conjunto de teste
     "SAVE_CONFUSION_MATRIX": True,
     # Segurança: evita explodir RAM/CSV em problemas com muitas classes
     "CONFUSION_MATRIX_MAX_CLASSES": 500,
@@ -311,7 +270,7 @@ CONFIG: Dict[str, Any] = {
     "FINAL_WEIGHTS_TXT_FILENAME": "final_model_best_weights.txt",
 
     # --------------------------------------------------------
-    # (2) NOVO: FORÇAR GPU / CPU (opcional) - sem mexer no resto
+    # (2) FORÇAR GPU / CPU (opcional)
     # --------------------------------------------------------
     # Se FORCE_GPU=True, tentamos travar o runtime para usar /GPU:0.
     # Se FORCE_GPU_STRICT=True e não houver GPU, levantamos erro.
@@ -325,17 +284,12 @@ CONFIG: Dict[str, Any] = {
     "PRINT_DEVICE_DIAGNOSTICS": True,
 }
 
-# Observação importante:
-# - CONFIG["DEVICE"] será definido *depois* que configurarmos os dispositivos,
-#   para respeitar FORCE_GPU/FORCE_CPU. Isso não muda os hiperparâmetros nem
-#   a lógica do treino; só controla onde o TF tenta alocar operações.
-
 
 # ============================================================
-# GPU/CPU SETUP (com opção de "forçar" GPU)
+# GPU/CPU SETUP
 # ============================================================
 def _print_visible_devices() -> None:
-    """Imprime dispositivos visíveis (útil para diagnosticar 'estou caindo na CPU')."""
+    """Imprime dispositivos visíveis (diagnóstico)."""
     try:
         vis = tf.config.get_visible_devices()
         print("[DBG] Visible devices:")
@@ -362,10 +316,8 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
     Ideia didática:
     - O TensorFlow pode enxergar GPU mas, se certos kernels não existirem
       (ou se o backend estiver mal instalado), ele faz fallback para CPU.
-    - Aqui, a gente tenta *guiar* o TF: visibilidade de devices e device scope.
 
     Importante:
-    - set_visible_devices deve ser feito cedo (antes do uso pesado de GPU).
     - Mesmo forçando /GPU:0, algumas ops podem cair na CPU se não houver kernel GPU.
     """
     force_cpu = bool(cfg.get("FORCE_CPU", False))
@@ -409,7 +361,7 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
 
         return "/GPU:0"
 
-    # Comportamento padrão (igual ao seu original): usa GPU se existir, senão CPU.
+    # Comportamento padrão: usa GPU se existir, senão CPU.
     if gpus:
         try:
             tf.config.set_visible_devices(gpus[0], "GPU")
@@ -425,7 +377,7 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
     return "/CPU:0"
 
 
-# Configura e grava o device escolhido no CONFIG (sem mexer em hiperparâmetros)
+# Configura e grava o device escolhido no CONFIG
 CONFIG["DEVICE"] = configure_devices(CONFIG)
 
 if bool(CONFIG.get("PRINT_DEVICE_DIAGNOSTICS", True)):
@@ -545,7 +497,7 @@ def confirm_image_resolution(df: pd.DataFrame, cfg: Dict[str, Any], sample_n: Op
 
 
 # =========================
-# NOVO: SPLITS ESTRATIFICADOS (por classe) PARA HOLD-OUT
+# SPLITS ESTRATIFICADOS (por classe) PARA HOLD-OUT
 # =========================
 def _pick_holdout_classes(
     ys: List[int],
@@ -607,7 +559,7 @@ def stratified_holdout_split_by_class(
         if len(grp_idx) <= min_keep_per_class:
             continue
 
-        # RNG por classe para manter reproduzibilidade e evitar correlação esquisita
+        # RNG por classe para manter reproduzibilidade
         rng = np.random.default_rng(int(cfg["SEED"]) + int(seed_offset) + 10007 * int(y))
         rng.shuffle(grp_idx)
 
@@ -638,7 +590,7 @@ def stratified_holdout_split_by_class(
 
 
 # =========================
-# CNN TRADICIONAL (BY THE BOOK)
+# CNN TRADICIONAL
 # =========================
 def _as_tuple2(v, name: str) -> Tuple[int, int]:
     """Aceita int, lista/tupla de 2 ints, ou string tipo "3,3" e devolve (a,b)."""
@@ -656,9 +608,9 @@ def _as_tuple2(v, name: str) -> Tuple[int, int]:
     raise ValueError(f"Config inválida para {name}: {v!r} (esperado int ou par de ints)")
 
 
-def build_cnn_by_slides(cfg: Dict[str, Any], num_classes: int) -> Model:
+def build_cnn(cfg: Dict[str, Any], num_classes: int) -> Model:
     """
-    CNN tradicional exatamente como no slide:
+    CNN tradicional:
       Conv2D(32, (3,3), relu) -> MaxPool(2,2) ->
       Conv2D(64, (3,3), relu) -> MaxPool(2,2) ->
       Flatten -> Dense(128, relu) -> Dense(num_classes, softmax)
@@ -1290,7 +1242,7 @@ def post_training_test_report(
 
     # Reconstrói e aplica pesos
     with tf.device(cfg["DEVICE"]):
-        model = build_cnn_by_slides(cfg, num_classes=num_classes)
+        model = build_cnn(cfg, num_classes=num_classes)
     model.set_weights(best_weights)
 
     loss_fn = make_loss(cfg, num_classes)
@@ -1525,7 +1477,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
 
             # Cria modelo no device desejado
             with tf.device(cfg["DEVICE"]):
-                model = build_cnn_by_slides(cfg, num_classes=num_classes)
+                model = build_cnn(cfg, num_classes=num_classes)
 
             # NOVO: optimizer agora recebe steps_per_epoch e epochs_max (para o schedule)
             steps_per_epoch = int(math.ceil(len(train_df) / max(1, int(cfg["BATCH_SIZE"]))))
@@ -1694,7 +1646,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         set_seed(int(cfg["SEED"]) + 777_777)
 
         with tf.device(cfg["DEVICE"]):
-            final_model = build_cnn_by_slides(cfg, num_classes=num_classes)
+            final_model = build_cnn(cfg, num_classes=num_classes)
         final_model.set_weights(best_global_weights)
 
         loss_fn = make_loss(cfg, num_classes)
