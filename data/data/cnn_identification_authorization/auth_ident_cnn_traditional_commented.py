@@ -6,51 +6,27 @@ Renan Rios Diniz
 
 Código de avaliação de modelo com tarefas de identificação e autenticação
 Consome parâmetros de modelo treinado
-Multilayer Perceptron com 1 Hidden Layer
+CNN Tradicional
 """
 
-#Referências (em comum com avaliação para regressão logística)
-# C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006.
-# K. P. Murphy, Machine Learning: A Probabilistic Perspective. MIT Press, 2012.
-# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006.
-# C. J. van Rijsbergen, Information Retrieval, 2nd ed. Butterworth-Heinemann, 1979. (F-measure)
-# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC…,” Journal of Machine Learning Technologies, 2011.
-# B. Schölkopf and A. J. Smola, Learning with Kernels. MIT Press, 2002.
-# G. B. Huang et al., “Labeled Faces in the Wild…,” UMass Amherst, Tech. Rep. 07-49, 2007.
-#
-# Comentário: A tarefa de autenticação por pares ('same/different') é o protocolo clássico de benchmarks como LFW.
-# A lógica moderna costuma operar com *embeddings* L2-normalizados e similaridade cosseno (ou distância Euclidiana)
-# e escolhe um limiar para equilibrar taxas de falso positivo/negativo (Fawcett, 2006; Schroff et al., 2015).
-# A amostragem de pares aqui evita o custo quadrático de enumerar todos os pares possíveis (O(N^2)) em datasets grandes.
-#
-# F. Schroff, D. Kalenichenko, and J. Philbin, “FaceNet…,” in Proc. IEEE CVPR, 2015.
-# J. Deng et al., “ArcFace…,” in Proc. IEEE CVPR, 2019.
-# H. He and E. A. Garcia, “Learning from Imbalanced Data,” IEEE TKDE, vol. 21, no. 9, pp. 1263–1284, 2009.
-# M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
-# P. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” in Proc. IJCAI, 1995.
-# S. Kaufman, S. Rosset, and C. Perlich, “Leakage in Data Mining: Formulation, Detection, and Avoidance,” in Proc. ACM KDD, 2012.
-
-#Referências (específicas para MLP)
-# E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
-# Wang, Feng, et al. "Normface: L2 hypersphere embedding for face verification." Proceedings of the 25th ACM international conference on Multimedia. 2017.
-# Krizhevsky, Alex, and Geoff Hinton. "Convolutional deep belief networks on cifar-10." Unpublished manuscript 40.7 (2010): 1-9.
-# K. He, X. Zhang, S. Ren, and J. Sun, “Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification,” in Proc. ICCV, 2015.
-# J. L. Ba, J. R. Kiros, and G. E. Hinton, “Layer normalization,” arXiv:1607.06450, 2016.
-
-
-# ==================================================================================================
-# NOTAS DE LEITURA / PROPRIEDADE INTELECTUAL (comentários adicionados — sem alteração de lógica)
+ ==================================================================================================
+# NOTAS  / REFERÊNCIAS
 # --------------------------------------------------------------------------------------------------
 # Este script implementa um pipeline de *avaliação* (não-treino) para duas tarefas comuns em reconhecimento facial:
 #   (1) Identificação (classificação multi-classe: 'quem é?')
 #   (2) Autenticação / verificação (binária: 'é a mesma pessoa?') via pares e um limiar (threshold).
 #
 # A lógica central segue a família de abordagens 'embedding + similaridade' popularizada em verificação facial
-# (por exemplo, FaceNet / ArcFace), mas aqui reaproveita a saída do seu modelo (MLP/HOG ou CNN Keras) para:
+# (por exemplo, FaceNet / ArcFace), mas aqui reaproveita a saída do modelo (CNN Keras) para:
 #   - gerar probabilidades por classe P(x) (softmax);
 #   - extrair um embedding (ativação interna) e L2-normalizar;
 #   - comparar pares por: (i) cosseno (dot em embeddings normalizados), (ii) dot de probas,
 #     (iii) regra discreta de 'mesmo ID predito' + confiança.
+#
+# A tarefa de autenticação por pares ('same/different') é o protocolo clássico de benchmarks como LFW.
+# A lógica moderna costuma operar com *embeddings* L2-normalizados e similaridade cosseno (ou distância Euclidiana)
+# e escolhe um limiar para equilibrar taxas de falso positivo/negativo (Fawcett, 2006; Schroff et al., 2015).
+# A amostragem de pares aqui evita o custo quadrático de enumerar todos os pares possíveis (O(N^2)) em datasets grandes.
 #
 # Sobre os hiperparâmetros 'de avaliação' (não do treino):
 #   • sampling de pares (pos_pairs_per_class, neg_pairs_total, sample_pairs_if_large) controla custo O(N^2).
@@ -58,15 +34,33 @@ Multilayer Perceptron com 1 Hidden Layer
 #   • tune_metric escolhe o critério (F1 / balanced accuracy / accuracy), afetando o ponto de operação.
 #   • macro_auc (por identidade) corrige o viés do micro-AUC quando há classes desbalanceadas (#imagens por pessoa).
 #
-# Referências acadêmicas citadas no código original e usadas nos comentários abaixo incluem:
-#   - ROC/AUC: Fawcett (2006); métricas em dados desbalanceados: Sokolova & Lapalme (2009); He & Garcia (2009).
-#   - Validação e seleção (risco de vazamento): Kohavi (1995); Kaufman et al. (2012).
-#   - Verificação facial / embeddings: Huang et al. (LFW, 2007); Schroff et al. (FaceNet, 2015); Deng et al. (ArcFace, 2019).
-#   - Redes neurais e backprop: Rumelhart et al. (1986).
-#   - Normalizações / ativação ReLU: He et al. (2015); LayerNorm: Ba et al. (2016).
+
+#Referências
+# C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006.
+# K. P. Murphy, Machine Learning: A Probabilistic Perspective. MIT Press, 2012.
+# T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006.
+# C. J. van Rijsbergen, Information Retrieval, 2nd ed. Butterworth-Heinemann, 1979. (F-measure)
+# D. M. W. Powers, “Evaluation: From Precision, Recall and F-Measure to ROC…,” Journal of Machine Learning Technologies, 2011.
+# B. Schölkopf and A. J. Smola, Learning with Kernels. MIT Press, 2002.
+# G. B. Huang et al., “Labeled Faces in the Wild…,” UMass Amherst, Tech. Rep. 07-49, 2007.
+# F. Schroff, D. Kalenichenko, and J. Philbin, “FaceNet…,” in Proc. IEEE CVPR, 2015.
+# J. Deng et al., “ArcFace…,” in Proc. IEEE CVPR, 2019.
+# H. He and E. A. Garcia, “Learning from Imbalanced Data,” IEEE TKDE, vol. 21, no. 9, pp. 1263–1284, 2009.
+# M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
+# P. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” in Proc. IJCAI, 1995.
+# S. Kaufman, S. Rosset, and C. Perlich, “Leakage in Data Mining: Formulation, Detection, and Avoidance,” in Proc. ACM KDD, 2012.
+# E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
+# Wang, Feng, et al. "Normface: L2 hypersphere embedding for face verification." Proceedings of the 25th ACM international conference on Multimedia. 2017.
+# Krizhevsky, Alex, and Geoff Hinton. "Convolutional deep belief networks on cifar-10." Unpublished manuscript 40.7 (2010): 1-9.
+# K. He, X. Zhang, S. Ren, and J. Sun, “Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification,” in Proc. ICCV, 2015.
+# J. L. Ba, J. R. Kiros, and G. E. Hinton, “Layer normalization,” arXiv:1607.06450, 2016.
+#
 #
 # Nota prática: quando este script roda no modo CNN Keras, a leitura/normalização das imagens ocorre via tf.data
 # e decode_jpeg/resize, com padrão comum de normalização por canal (mean/std) usado em pipelines de visão.
+
+
+
 # ==================================================================================================
 
 from __future__ import annotations
@@ -274,7 +268,7 @@ def _resolve_model_path(out_dir: Path, cfg_train: Dict[str, Any]) -> Path:
 
 
 # ============================================================
-# IO DO DATASET (HOG joblib)
+# IO DO DATASET (legado HOG joblib)
 # ============================================================
 
 def carregar_dataset_joblib(path: str, *, label2idx: Optional[Dict[int, int]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
@@ -429,7 +423,6 @@ def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.nda
 def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     """Aplica padronização.
 
-    Mantém o contrato do script original, mas com um detalhe extra:
     - Se X for um vetor de *caminhos de arquivo* (dtype string/object), não padroniza aqui
       (a normalização é aplicada on-the-fly no pipeline TensorFlow em inferência).
     - Para vetores (MLP/HOG): comportamento idêntico ao original.
@@ -1911,7 +1904,7 @@ def main():
 
     # ------------------------------------------------------------
     # Macro AUC (AUTENTICAÇÃO) por identidade: média simples dos AUCs por classe
-    # (equivalente ao seu "AUC composto" = mean(AUC one-vs-all) em autenticação)
+    # (equivalente ao "AUC composto" = mean(AUC one-vs-all) em autenticação)
     # ------------------------------------------------------------
     macro_auth_cfg = (auth_cfg.get("macro_auc", {}) or {})
     if bool(macro_auth_cfg.get("enable", False)):
