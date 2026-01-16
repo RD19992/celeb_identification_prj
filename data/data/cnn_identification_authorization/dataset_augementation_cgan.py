@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
+
 Treinamento de cGAN (Conditional GAN) para Augmentation de Faces (CelebA)
 ========================================================================
 
 Este script:
-1) Lê imagens já processadas pelo seu pipeline de ingestão:
+1) Lê imagens já processadas pelo pipeline de ingestão:
    - INPUT_DATA_DIR/images/*.jpg
    - INPUT_DATA_DIR/manifest.csv  (colunas mínimas: image_name, label; opcional: ok, dst)
-2) Treina uma cGAN (G(z,y)->x e D(x,y)->{0,1}) conforme os slides da disciplina:
+2) Treina uma cGAN (G(z,y)->x e D(x,y)->{0,1}):
    - Gerador: noise + embedding(label) -> Dense -> Conv2DTranspose ... -> tanh
    - Discriminador: concat(img, embedding(label)->(H,W,1)) -> Conv2D ... -> sigmoid
    - Treino alternado: atualiza D com real/fake e depois G para "enganar" D
@@ -16,7 +20,7 @@ Este script:
    - manifest.csv : metadados completos preservando a identidade original (label)
 
 GPU / DirectML:
-- Em Windows, normalmente você usa "tensorflow-directml" (ou TF + plugin DirectML).
+- Em Windows usa "tensorflow-directml" (ou TF + plugin DirectML).
 - O script valida presença de device GPU e roda um matmul teste imprimindo o device.
 - Se REQUIRE_GPU=True e não houver GPU, o script falha explicitamente.
 
@@ -50,7 +54,7 @@ import tensorflow as tf
 
 
 # =============================================================================
-# 1) CONFIGURAÇÕES (AJUSTE AQUI)
+# 1) CONFIGURAÇÕES
 # =============================================================================
 
 @dataclass
@@ -77,7 +81,7 @@ class CganConfig:
     # Treino
     EPOCHS: int = 30
     BATCH_SIZE: int = 64
-    LEARNING_RATE: float = 2e-4     # slides: Adam(0.0002, 0.5)
+    LEARNING_RATE: float = 2e-4     # Adam(0.0002, 0.5)
     ADAM_BETA1: float = 0.5
     BUFFER_SIZE: int = 10_000
     PRINT_EVERY_STEPS: int = 100    # log a cada N batches
@@ -86,7 +90,7 @@ class CganConfig:
     # -------------------------
     # Dataset sampling (opcional)
     # -------------------------
-    # Se quiser treinar cGAN com subset (para testar rápido), ajuste:
+    # cGAN com subset (para testar rápido), ajustar:
     MAX_IMAGES_FOR_GAN: int | None = None   # ex.: 20_000 ou None (usa tudo)
     MAX_IDENTITIES_FOR_GAN: int | None = None  # ex.: 200 ou None (usa todas)
 
@@ -191,7 +195,7 @@ def utc_now_iso() -> str:
 
 def load_ingestion_manifest(input_dir: Path) -> pd.DataFrame:
     """
-    Espera estrutura do seu pipeline de ingestão:
+    Espera estrutura do pipeline de ingestão:
       input_dir/
         images/
         manifest.csv
@@ -779,7 +783,7 @@ def main():
     num_classes = len(id_to_class)
     print("[GAN] Treinando com num_classes =", num_classes)
 
-    # Pasta de outputs do GAN (dentro do out_root, para ficar colado no seu pipeline)
+    # Pasta de outputs do GAN (dentro do out_root, para ficar colado no pipeline)
     gan_out_dir = out_root / "cgan_training_outputs"
     ensure_dir(gan_out_dir)
 
@@ -800,7 +804,7 @@ if __name__ == "__main__":
 
 
 # =============================================================================
-# 8) REFERÊNCIAS (para citar no relatório)
+# 8) REFERÊNCIAS (para relatório)
 # =============================================================================
 """
 [1] Goodfellow, I., Pouget-Abadie, J., Mirza, M., et al. (2014).
