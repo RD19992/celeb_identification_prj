@@ -6,50 +6,23 @@ Renan Rios Diniz
 
 Código de avaliação de modelo com tarefas de identificação e autenticação
 Consome parâmetros de modelo treinado
-Multilayer Perceptron com 1 Hidden Layer
+CNN ResNet
 """
 
 # ======================================================================
-
-# NOTAS DE LEITURA E CONTEXTO (comentários adicionados; lógica inalterada)
-
+# # NOTAS  / REFERÊNCIAS
 # ----------------------------------------------------------------------
-
 # Este script implementa duas tarefas clássicas em biometria/visão:
-
 #   (1) Identificação (1:N): 'quem é esta pessoa?' -> argmax/probabilidades.
-
 #   (2) Autenticação/Verificação (1:1): 'é a mesma pessoa?' -> similaridade
-
 #       + limiar (threshold) + métricas como ROC/AUC.
-
 # A abordagem se apoia em representações (embeddings) extraídas de uma rede
-
 # (aqui: CNN/ResNet via Keras OU o MLP/HOG legado) e em medidas de similaridade.
-
 #
-
-# Leituras-base recomendadas para o arcabouço conceitual:
-
-# - F. Schroff, D. Kalenichenko, J. Philbin, 'FaceNet' (embeddings + verificação)
-
-#   https://arxiv.org/abs/1503.03832
-
-# - K. He et al., 'Deep Residual Learning for Image Recognition' (ResNet)
-
-#   https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/He_Deep_Residual_Learning_CVPR_2016_paper.pdf
-
-# - T. Fawcett, 'An introduction to ROC analysis' (ROC/AUC)
-
-#   DOI: 10.1016/j.patrec.2005.10.010
-
-# - C. M. Bishop (PRML) e K. P. Murphy (MLPP) para probabilidade e classificação.
 
 # ======================================================================
 
-
-
-#Referências (em comum com avaliação para regressão logística)
+#Referências
 # C. M. Bishop, Pattern Recognition and Machine Learning. Springer, 2006.
 # K. P. Murphy, Machine Learning: A Probabilistic Perspective. MIT Press, 2012.
 # T. Fawcett, “An introduction to ROC analysis,” Pattern Recognition Letters, vol. 27, no. 8, pp. 861–874, 2006.
@@ -63,8 +36,6 @@ Multilayer Perceptron com 1 Hidden Layer
 # M. Sokolova and G. Lapalme, “A systematic analysis of performance measures…,” Information Processing & Management, 2009.
 # P. Kohavi, “A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,” in Proc. IJCAI, 1995.
 # S. Kaufman, S. Rosset, and C. Perlich, “Leakage in Data Mining: Formulation, Detection, and Avoidance,” in Proc. ACM KDD, 2012.
-
-#Referências (específicas para MLP)
 # E. Rumelhart, G. E. Hinton, and R. J. Williams, “Learning representations by back-propagating errors,” Nature, vol. 323, pp. 533–536, 1986.
 # Wang, Feng, et al. "Normface: L2 hypersphere embedding for face verification." Proceedings of the 25th ACM international conference on Multimedia. 2017.
 # Krizhevsky, Alex, and Geoff Hinton. "Convolutional deep belief networks on cifar-10." Unpublished manuscript 40.7 (2010): 1-9.
@@ -272,7 +243,7 @@ def _resolve_model_path(out_dir: Path, cfg_train: Dict[str, Any]) -> Path:
 
 
 # ============================================================
-# IO DO DATASET (HOG joblib)
+# IO DO DATASET (legado HOG joblib)
 # ============================================================
 
 def carregar_dataset_joblib(path: str, *, label2idx: Optional[Dict[int, int]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
@@ -426,8 +397,6 @@ def filtrar_por_classes(X: np.ndarray, y: np.ndarray, classes_permitidas: np.nda
 
 def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     """Aplica padronização.
-
-    Mantém o contrato do script original, mas com um detalhe extra:
     - Se X for um vetor de *caminhos de arquivo* (dtype string/object), não padroniza aqui
       (a normalização é aplicada on-the-fly no pipeline TensorFlow em inferência).
     - Para vetores (MLP/HOG): comportamento idêntico ao original.
@@ -465,12 +434,9 @@ def apply_standardizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.n
 
 
 
-# [NOTAS] Softmax estável numericamente.
-
+# Softmax estável numericamente.
 # A implementação 'stable_softmax' tipicamente subtrai o máximo do vetor de logits antes
-
 # de aplicar exp(), prevenindo overflow/underflow (padrão em bibliotecas numéricas).
-
 # Discussões aparecem em textos de ML como Murphy (2012) e Bishop (2006).
 
 
@@ -553,24 +519,16 @@ def layernorm_forward(Z: np.ndarray, gamma: np.ndarray, beta: np.ndarray, eps: f
 
 
 
-# [NOTAS] Inferência em dois modos (compatibilidade legada + Keras CNN/ResNet).
-
+# Inferência em dois modos (compatibilidade legada + Keras CNN/ResNet).
 # - 'modelo' como dict: implementa o forward do MLP/HOG antigo.
-
 # - 'modelo' como tf.keras.Model: usa um modelo Keras (p.ex. CNN tradicional ou ResNet)
-
 #   e constrói um 'combined model' que retorna (probabilidades, embedding) em um só forward.
-
 # Esse padrão é comum quando queremos usar a rede tanto para classificação quanto para
-
 # verificação via embeddings (cf. FaceNet). https://arxiv.org/abs/1503.03832
-
 #
 
 # Sobre embeddings e L2-normalização:
-
 # - Usar embeddings normalizados é uma prática padrão para similaridade por cosseno e
-
 #   perdas/margens angulares (ArcFace) em reconhecimento facial. https://arxiv.org/abs/1801.07698
 
 
@@ -661,18 +619,12 @@ def mlp_forward_inference(
             paths_tf = tf.convert_to_tensor(X.astype(str))
 
 
-# [NOTAS] Pipeline tf.data (leitura/decodificação/resize/normalização).
-
+# Pipeline tf.data (leitura/decodificação/resize/normalização).
 # - tf.data viabiliza streaming eficiente e paralelismo (map/batch/prefetch), reduzindo
-
 #   gargalos de IO em inferência em lote.
-
 # - A normalização (subtrair média e dividir por desvio) é uma forma de 'standardization'
-
 #   que estabiliza escalas de entrada; em CNNs, frequentemente vem junto de BatchNorm
-
 #   internamente na rede, mas ainda é útil padronizar pixels de forma consistente.
-
 #   Batch Normalization: Ioffe & Szegedy (2015). https://arxiv.org/abs/1502.03167
 
 
@@ -699,12 +651,9 @@ def predict_labels(X: np.ndarray, classes: np.ndarray, modelo: Dict[str, Any], i
 
 
 
-# [NOTAS] Extração de embedding.
-
+# Extração de embedding.
 # Aqui o embedding é a ativação de uma camada interna (A1_pre), seguida de normalização L2.
-
 # Isto transforma distância/cosseno em medida comparável entre amostras e é o ingrediente
-
 # fundamental para verificação/autenticação com threshold (cf. FaceNet). https://arxiv.org/abs/1503.03832
 
 
@@ -721,14 +670,10 @@ def extract_embeddings(X: np.ndarray, modelo: Dict[str, Any], inference_params: 
 # ============================================================
 
 
-# [NOTAS] Métricas para autenticação/verificação.
-
+# Métricas para autenticação/verificação.
 # - ROC/AUC são padrões para avaliar classificadores binários em vários thresholds.
-
 #   Uma leitura clássica e altamente citada é Fawcett (2006). https://dl.acm.org/doi/10.1016/j.patrec.2005.10.010
-
 # - Medidas derivadas de matriz de confusão (precisão, revocação, F1) são tradicionais em
-
 #   Recuperação de Informação; ver van Rijsbergen (1979) para F-measure.
 
 
@@ -840,11 +785,9 @@ def _sample_negative_pairs(y: np.ndarray, rng: np.random.Generator, total: int):
 
 def _sample_pairs_uniform(n: int, rng: np.random.Generator, n_pairs: int) -> Tuple[np.ndarray, np.ndarray]:
     """Amostra n_pairs pares (i<j) aproximadamente uniformes (com reposição).
-
     Observações:
       - Para n grande, amostragem SEM reposição/sem duplicatas é cara e desnecessária aqui.
       - Duplicatas têm efeito desprezível nas métricas/ROC quando n_pairs é grande.
-
     Retorna:
       ii, jj: arrays int64 com shape (n_pairs,), com ii[k] < jj[k] e ii[k] != jj[k].
     """
@@ -874,11 +817,9 @@ def _sample_pairs_uniform(n: int, rng: np.random.Generator, n_pairs: int) -> Tup
 
 def roc_auc_fast(scores: np.ndarray, truth: np.ndarray) -> float:
     """Calcula AUC ROC binária em O(n log n).
-
     Motivação: a função roc_curve_simple() existente enumera TODOS os thresholds únicos,
     o que explode para centenas de milhares/milhões de pares. Aqui usamos o método padrão:
     ordena por score decrescente e calcula cumulativos (equivalente ao sklearn).
-
     Ref (intuição/ROC): T. Fawcett, "An introduction to ROC analysis", Pattern Recognition Letters, 2006.
     """
     scores = np.asarray(scores, dtype=np.float32).ravel()
@@ -985,7 +926,7 @@ def auth_macro_auc_per_identity(
         if idx_other.size < 1:
             continue
 
-        k_pos = min(pos_pairs_per_class, 10_000_000)  # guard rail
+        k_pos = min(pos_pairs_per_class, 10_000_000)  # guardrail
         k_neg = min(neg_pairs_per_class, 10_000_000)
         if k_pos <= 0 or k_neg <= 0:
             continue
@@ -1154,14 +1095,10 @@ def _score_summary(scores: np.ndarray) -> Dict[str, float]:
 
 
 
-# [NOTAS] Amostragem de pares para verificação.
-
+# Amostragem de pares para verificação.
 # Em autenticação, avaliamos pares (mesma identidade vs identidades diferentes).
-
 # A forma de amostragem influencia variância das métricas e o equilíbrio entre positivos
-
 # e negativos. Sistemas de face recognition frequentemente treinam/validam com pares ou
-
 # triplas (FaceNet usa triplet loss e mineração de triplas). https://arxiv.org/abs/1503.03832
 
 
@@ -1198,13 +1135,9 @@ def build_tuning_pairs(y: np.ndarray, rng: np.random.Generator,
 
 
 # [NOTAS] Seleção de threshold (calibração de decisão).
-
 # Transformar um 'score contínuo' (similaridade / confiança) em decisão binária exige um
-
 # limiar. Selecionar o limiar com base em um conjunto de validação é prática padrão.
-
-# ROC ajuda a visualizar o trade-off; AUC resume desempenho independente de threshold.
-
+ # ROC ajuda a visualizar o trade-off; AUC resume desempenho independente de threshold.
 # Referência-base: Fawcett (2006). https://dl.acm.org/doi/10.1016/j.patrec.2005.10.010
 
 
@@ -1264,7 +1197,6 @@ def tune_threshold_identity_confidence(y_pred: np.ndarray, pmax: np.ndarray,
     """
     Regra de verificação baseada em identidade prevista e confiança:
       same = (y_pred[i] == y_pred[j]) AND (min(pmax_i, pmax_j) >= thr_conf)
-
     Faz tuning do thr_conf (balanceado via truth fornecido).
     """
     y_pred = np.asarray(y_pred, dtype=np.int64)
@@ -1371,7 +1303,7 @@ def eval_auth_pairs_full_identity_confidence(y_pred: np.ndarray, pmax: np.ndarra
 
 def roc_curve_simple(scores: np.ndarray, truth: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
-    ROC simples (sem sklearn). Retorna fpr, tpr, thresholds, auc.
+    ROC simples. Retorna fpr, tpr, thresholds, auc.
     truth: 1/0
     """
     scores = np.asarray(scores, dtype=np.float32).ravel()

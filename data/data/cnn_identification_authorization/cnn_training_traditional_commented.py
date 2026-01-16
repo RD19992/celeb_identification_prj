@@ -166,7 +166,7 @@ CONFIG: Dict[str, Any] = {
 
     # Perda (categorical cross-entropy).
     # Em problemas com MUITAS classes, SparseCategoricalCrossentropy é equivalente e costuma ser mais eficiente.
-    "USE_SPARSE_CE": False,
+    "USE_SPARSE_CE": True,
 
     # --------------------------------------------------------
     # Regularização

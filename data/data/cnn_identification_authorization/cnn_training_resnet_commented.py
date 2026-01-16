@@ -4,7 +4,7 @@ EACH_USP: SIN-5016 - Aprendizado de Máquina
 Laura Silva Pelicer
 Renan Rios Diniz
 
-Treinamento de CNN ResNet "explicit" com K-Fold CV.
+Treinamento de CNN ResNet com K-Fold CV.
 
 Arquivos gerados (por execução), dentro de:
   <DATASET_DIR>/runs/<YYYYMMDD_HHMMSS>/
