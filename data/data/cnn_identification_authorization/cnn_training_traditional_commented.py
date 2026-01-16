@@ -674,7 +674,7 @@ def build_cnn(cfg: Dict[str, Any], num_classes: int) -> Model:
 
     return Model(inputs=inp, outputs=out, name="CNNTraditionalByTheBook")
 
-# DATA LOADING + STRATIFIED KFOLD (NO SKLEARN)
+# DATA LOADING + STRATIFIED KFOLD
 # =========================
 def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[int, int]]:
     """
@@ -709,7 +709,7 @@ def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[in
     if df.empty:
         raise RuntimeError("No valid images after filtering by file existence / ok flag.")
 
-    # Top classes por frequência (mantido)
+    # Top classes por frequência
     top_fraction = cfg["TOP_CLASS_FRACTION"]
     if not (0 < top_fraction <= 1.0):
         raise ValueError("TOP_CLASS_FRACTION must be in (0,1].")
@@ -742,7 +742,7 @@ def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[in
 
 def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
-    K-Fold estratificado (sem sklearn):
+    K-Fold estratificado:
     - Para cada classe y: embaralha índices e divide em k "chunks".
     - Fold i: validação = chunk i de cada classe; treino = resto.
 
@@ -768,7 +768,7 @@ def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[
 
 
 # =========================
-# TF.DATA PIPELINE (FAST)
+# TF.DATA PIPELINE
 # =========================
 def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
     """
@@ -863,13 +863,13 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
 # =========================
 def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     """
-    NOVO: Learning-rate schedule configurável.
+    Learning-rate schedule configurável.
 
     O TF espera decay_steps em "passos" (batches), então convertemos épocas -> passos:
       total_steps ~= steps_per_epoch * epochs
 
     Tipos implementados:
-    - constant (igual ao script antigo)
+    - constant
     - exponential_decay
     - cosine_decay
     - cosine_decay_restarts
@@ -924,8 +924,8 @@ def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: in
 
 def make_optimizer(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     """
-    Otimizador Adam (mantido), agora com learning-rate schedule configurável (NOVO).
-    Se MIXED_PRECISION=True, encapsula com LossScaleOptimizer (mantido).
+    Otimizador Adam, agora com learning-rate schedule configurável.
+    Se MIXED_PRECISION=True, encapsula com LossScaleOptimizer.
     """
     lr = make_learning_rate(cfg, steps_per_epoch=steps_per_epoch, epochs_max=epochs_max)
     opt = tf.keras.optimizers.Adam(learning_rate=lr)
@@ -940,7 +940,7 @@ def make_optimizer(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
 
 def make_loss(cfg: Dict[str, Any], num_classes: int):
     """
-    Perda 'by the book' (slides): Categorical Cross-Entropy + saída softmax.
+    Perda: Categorical Cross-Entropy + saída softmax.
 
     - Default (USE_SPARSE_CE=False): usa CategoricalCrossentropy (one-hot internamente).
     - Opcional (USE_SPARSE_CE=True): usa SparseCategoricalCrossentropy (equivalente e mais eficiente).
@@ -998,7 +998,7 @@ def train_one_epoch(
 
             loss = base_loss + reg_loss
 
-        # Mixed precision loss scaling (mantido)
+        # Mixed precision loss scaling
         if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer) or (
                 hasattr(optimizer, "get_scaled_loss") and hasattr(optimizer, "get_unscaled_gradients")
         ):
@@ -1008,7 +1008,7 @@ def train_one_epoch(
         else:
             grads = tape.gradient(loss, model.trainable_variables)
 
-        # Filtra gradientes None (mantido)
+        # Filtra gradientes None
         grads_and_vars = [(g, v) for (g, v) in zip(grads, model.trainable_variables) if g is not None]
         if not grads_and_vars:
             raise RuntimeError(
@@ -1039,7 +1039,7 @@ def train_one_epoch(
         total_correct += int(correct.numpy())
         total_seen += bn
 
-        # Debug do primeiro batch (muito útil para ver device/dtype)
+        # Debug do primeiro batch (device/dtype)
         if bool(cfg.get("PRINT_FIRST_BATCH_INFO", True)) and not first_batch_printed:
             first_batch_printed = True
             try:
@@ -1115,7 +1115,7 @@ def evaluate(model: Model, ds, loss_fn, cfg: Dict[str, Any]):
 
 
 # ============================================================
-# (3) PÓS-TREINO: "TESTE" + 10 EXEMPLOS + ONE-VS-ALL
+# PÓS-TREINO: "TESTE" + 10 EXEMPLOS + ONE-VS-ALL
 # ============================================================
 def _preprocess_single_image(path: str, cfg: Dict[str, Any]) -> tf.Tensor:
     """
@@ -1222,12 +1222,12 @@ def post_training_test_report(
     - Imprime erro/acc/loss e mostra 10 exemplos aleatórios com predições.
     - Gera matriz one-vs-all para esses 10 exemplos.
 
-    Observação didática (mantida):
+    Observação didática:
     - Em K-Fold CV, não existe um test set único por padrão.
       O mais honesto, sem mudar sua lógica, é tratar o fold segurado (val) como "teste"
       do melhor fold (held-out).
 
-    NOVO: agora também pode ser usado com um TESTE FINAL real (hold-out antes do CV),
+    Também pode ser usado com um TESTE FINAL real (hold-out antes do CV),
     mantendo a mesma lógica de relatório.
     """
     print("\n" + "=" * 80)
@@ -1252,7 +1252,7 @@ def post_training_test_report(
     print(f"[TEST] n={len(df_val_as_test)} classes={num_classes} device={cfg['DEVICE']}")
 
     # --------------------------------------------------------
-    # Matriz de confusão no conjunto de teste (sugestão do slide)
+    # Matriz de confusão no conjunto de teste
     # --------------------------------------------------------
     cm = compute_confusion_matrix(model, test_ds, num_classes=num_classes, cfg=cfg)
     if cm is not None:
@@ -1318,7 +1318,7 @@ def post_training_test_report(
     print("\n[POST] Matriz de confusão one-vs-all (apenas para os 10 exemplos acima):")
     print(ova_df.to_string(index=False))
 
-    # Opcional: salvar relatórios no run_dir (não muda lógica do treino; só logging)
+    # Opcional: salvar relatórios no run_dir
     try:
         ova_path = run_dir / "post_one_vs_all_10examples.csv"
         ova_df.to_csv(ova_path, index=False, encoding="utf-8")
@@ -1333,7 +1333,7 @@ def post_training_test_report(
 
 
 # =========================
-# NOVO: salvar pesos em TXT
+# Salvar pesos em TXT
 # =========================
 def save_model_weights_txt(model: Model, path: Path) -> None:
     """
@@ -1382,10 +1382,8 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     Executa K-Fold CV e grava arquivos de log.
     Retorna: (cv_mean_best_val_err, run_dir)
 
-    Além disso (ajuste pedido):
+    Além disso:
     - Guarda o "melhor fold" (menor val_err) e faz um relatório final nele.
-
-    NOVO:
     - Antes do CV, cria um TESTE FINAL (hold-out) com % de classes configurável.
     - Após o CV, usa o melhor modelo do CV como inicialização e faz um treino final
       (com val interno + early stopping) e avalia no TESTE FINAL.
@@ -1399,7 +1397,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     confirm_image_resolution(df_full, cfg)
 
     # --------------------------------------------------------
-    # NOVO: split TESTE FINAL antes do CV
+    # Split TESTE FINAL antes do CV
     # --------------------------------------------------------
     cv_df, final_test_df, test_classes = stratified_holdout_split_by_class(
         df=df_full,
@@ -1421,11 +1419,11 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     if len(final_test_df) == 0:
         print("[WARN] final_test_df ficou vazio. Ajuste FINAL_TEST_* para reservar imagens de teste.")
     else:
-        # Só para ter um diagnóstico rápido do teste final:
+        # Diagnóstico rápido do teste final:
         print(f"[INFO] final_test classes presentes={final_test_df['y'].nunique()}")
 
     # --------------------------------------------------------
-    # CV propriamente dito (agora em cima de cv_df)
+    # CV propriamente dito (em cima de cv_df)
     # --------------------------------------------------------
     k = int(cfg["KFOLDS"])
     folds = stratified_kfold_indices(cv_df, k=k, seed=int(cfg["SEED"]))
@@ -1451,7 +1449,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         fold_summaries = []
         best_val_errs = []
 
-        # Ajuste pedido: guardar o melhor fold global para "teste" final
+        # Guardar o melhor fold global para "teste" final
         best_global_val_err = float("inf")
         best_global_weights: Optional[List[np.ndarray]] = None
         best_global_val_df: Optional[pd.DataFrame] = None
@@ -1479,7 +1477,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
             with tf.device(cfg["DEVICE"]):
                 model = build_cnn(cfg, num_classes=num_classes)
 
-            # NOVO: optimizer agora recebe steps_per_epoch e epochs_max (para o schedule)
+            # Optimizer recebe steps_per_epoch e epochs_max (para o schedule)
             steps_per_epoch = int(math.ceil(len(train_df) / max(1, int(cfg["BATCH_SIZE"]))))
             optimizer = make_optimizer(cfg, steps_per_epoch=steps_per_epoch, epochs_max=epochs_cv)
 
@@ -1541,7 +1539,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
                 "best_val_err": best_val_err,
             })
 
-            # Guarda o melhor fold global para o relatório final (ajuste pedido)
+            # Guarda o melhor fold global para o relatório final
             if best_val_err < best_global_val_err and best_weights is not None:
                 best_global_val_err = float(best_val_err)
                 best_global_weights = best_weights
@@ -1549,7 +1547,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
                 best_global_fold_i = int(fold_i)
                 best_global_epoch = int(best_epoch)
 
-            # Salva modelo (opcional, mantido)
+            # Salva modelo (opcional)
             if bool(cfg.get("SAVE_MODEL", False)):
                 models_dir = run_dir / "models"
                 ensure_dir(models_dir)
@@ -1589,7 +1587,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     print(f"[FILES] {run_dir}")
 
     # --------------------------------------------------------
-    # Ajuste antigo (3): relatório final no melhor fold (val como "teste")
+    # Ajuste antigo: relatório final no melhor fold (val como "teste")
     # --------------------------------------------------------
     try:
         if best_global_weights is not None and best_global_val_df is not None:
@@ -1609,7 +1607,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         print("[WARN] Post-training report failed:", e)
 
     # --------------------------------------------------------
-    # NOVO: TREINO FINAL (inicializa com melhor modelo do CV) + TESTE FINAL
+    # TREINO FINAL (inicializa com melhor modelo do CV) + TESTE FINAL
     # --------------------------------------------------------
     try:
         if best_global_weights is None:
@@ -1748,7 +1746,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         except Exception as e:
             print("[WARN] post_training_test_report on FINAL TEST failed:", e)
 
-        # Salvar modelo final + pesos txt (pedido)
+        # Salvar modelo final + pesos txt
         if bool(cfg.get("SAVE_FINAL_MODEL", True)):
             models_dir = run_dir / "models"
             ensure_dir(models_dir)
