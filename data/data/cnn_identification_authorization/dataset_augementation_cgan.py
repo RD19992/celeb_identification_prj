@@ -62,12 +62,13 @@ class CganConfig:
     # -------------------------
     # Paths (entrada / saída)
     # -------------------------
-    # Aponte para o OUTPUT_DIR da ingestão (onde existem "images/" e "manifest.csv")
-    # Ex.: <project_root>/data/cnn_identification_authorization/celeba_rgb_128x128
-    INPUT_DATA_DIR: str = r"data/cnn_identification_authorization/celeba_rgb_128x128"
 
-    # Diretório onde colocaremos GAN_AUGMENTED_DATA (subpasta dentro do INPUT_DATA_DIR por padrão)
-    OUTPUT_ROOT_DIR: str = ""  # se vazio, usa INPUT_DATA_DIR
+    HERE = Path(__file__).resolve().parent
+
+    CFG = CganConfig(
+        INPUT_DATA_DIR=str(HERE / "celeba_rgb_128x128"),
+        OUTPUT_ROOT_DIR=str(HERE),  # GAN_AUGMENTED_DATA fica junto
+    )
 
     # -------------------------
     # cGAN: parâmetros centrais
@@ -79,7 +80,7 @@ class CganConfig:
     UPSAMPLE_BLOCKS: int = 3        # 8->16->32->64 (3 upsample) para IMG_SIZE=64
 
     # Treino
-    EPOCHS: int = 30
+    EPOCHS: int = 3
     BATCH_SIZE: int = 64
     LEARNING_RATE: float = 2e-4     # Adam(0.0002, 0.5)
     ADAM_BETA1: float = 0.5
