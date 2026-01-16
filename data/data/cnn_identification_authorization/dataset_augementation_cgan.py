@@ -62,13 +62,10 @@ class CganConfig:
     # -------------------------
     # Paths (entrada / saída)
     # -------------------------
-
-    HERE = Path(__file__).resolve().parent
-
-    CFG = CganConfig(
-        INPUT_DATA_DIR=str(HERE / "celeba_rgb_128x128"),
-        OUTPUT_ROOT_DIR=str(HERE),  # GAN_AUGMENTED_DATA fica junto
-    )
+    # Aponte para o OUTPUT_DIR da ingestão (onde existem "images/" e "manifest.csv")
+    # Ex.: <project_root>/data/cnn_identification_authorization/celeba_rgb_128x128
+    INPUT_DATA_DIR: str = r""   # vamos preencher no CFG
+    OUTPUT_ROOT_DIR: str = ""   # idem
 
     # -------------------------
     # cGAN: parâmetros centrais
@@ -116,7 +113,10 @@ class CganConfig:
     RANDOM_SEED: int = 42
 
 
-CFG = CganConfig()
+CFG = CganConfig(
+    INPUT_DATA_DIR=str(HERE / "celeba_rgb_128x128"),
+    OUTPUT_ROOT_DIR=str(HERE),
+)
 
 
 # =============================================================================
