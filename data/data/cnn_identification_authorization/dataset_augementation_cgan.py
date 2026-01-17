@@ -89,7 +89,7 @@ class CganConfig:
     # Dataset e imagens
     # ---------------------------
     # Tamanho usado no treino da GAN (menor -> muito mais rápido)
-    IMG_SIZE_TRAIN: int = 64
+    IMG_SIZE_TRAIN: int = 128
 
     # Tamanho com que as imagens (originais + sintéticas) serão gravadas na pasta
     # GAN_AUGMENTED_DATA. Default 128 para ficar compatível com seu dataset ingestão.
@@ -115,18 +115,18 @@ class CganConfig:
 
     # Generator
     G_LABEL_EMBED_DIM: int = 100
-    G_BASE_FILTERS: int = 256
-    G_UPSAMPLE_BLOCKS: int = 3
+    G_BASE_FILTERS: int = 384
+    G_UPSAMPLE_BLOCKS: int = 4
 
     # Discriminator
     # (IMPORTANTE p/ eficiência): embedding pequeno + Dense p/ H*W.
     D_LABEL_EMBED_DIM: int = 128
-    D_BASE_FILTERS: int = 64
-    D_NUM_BLOCKS: int = 3
+    D_BASE_FILTERS: int = 96
+    D_NUM_BLOCKS: int = 4
 
     # Treino
     BATCH_SIZE: int = 16
-    EPOCHS: int = 3
+    EPOCHS: int = 250
 
     # Learning rate (padrões próximos aos usados em DCGAN)
     # Heurística popularizada em DCGAN: Adam com beta1=0.5 (Radford, Metz & Chintala, 2015).
