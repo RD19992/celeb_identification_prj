@@ -86,11 +86,13 @@ CONFIG: Dict[str, Any] = {
     "MANIFEST_NAME": "manifest.csv",
     "ONLY_OK": True,                 # usa ok==True se a coluna existir
 
+
+
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 1.00,       # top fração de classes mais frequentes
-    "KFOLDS": 2,
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
+    "KFOLDS": 5,
     "SEED": 42,
 
     # --------------------------------------------------------
@@ -205,7 +207,7 @@ CONFIG: Dict[str, Any] = {
     "EPOCHS": 15,                     # - serve como default
 
     "EPOCHS_CV": 10,                  # max épocas por fold no CV
-    "EPOCHS_FINAL": 15,               # max épocas do treino final (antes do teste final)
+    "EPOCHS_FINAL": 40,               # max épocas do treino final (antes do teste final)
 
     # LR base, usado como "initial_lr" do schedule (se habilitado).
     "LR": 3e-4,
