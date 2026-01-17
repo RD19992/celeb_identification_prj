@@ -52,6 +52,14 @@ from PIL import Image
 
 import tensorflow as tf
 
+# Força usar apenas a GPU 0
+gpus = tf.config.list_physical_devices("GPU")
+if gpus:
+    tf.config.set_visible_devices(gpus[0], "GPU")
+    try:
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+    except Exception:
+        pass
 
 # =============================================================================
 # 1) CONFIGURAÇÕES
@@ -80,7 +88,7 @@ class CganConfig:
 
     # Treino
     EPOCHS: int = 3
-    BATCH_SIZE: int = 64
+    BATCH_SIZE: int = 16
     LEARNING_RATE: float = 2e-4     # Adam(0.0002, 0.5)
     ADAM_BETA1: float = 0.5
     BUFFER_SIZE: int = 10_000
