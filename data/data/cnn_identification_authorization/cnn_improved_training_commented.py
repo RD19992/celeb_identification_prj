@@ -105,11 +105,11 @@ CONFIG: Dict[str, Any] = {
 
     # Para cada classe escolhida acima, reservamos esta fração de imagens para teste final.
     # Importante: garantimos que sobrem pelo menos KFOLDS imagens no conjunto do CV para essa classe.
-    "FINAL_TEST_FRACTION_PER_CLASS": 0.10,
+    "FINAL_TEST_FRACTION_PER_CLASS": 0.20,
 
     # Para o treino final (antes do teste), separamos uma validação interna
     # (para early stopping do treino final), por classe.
-    "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.10,
+    "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.20,
 
     # --------------------------------------------------------
     # Entrada
@@ -204,7 +204,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     "BATCH_SIZE": 32,
 
-    "EPOCHS": 15,                     # - serve como default
+    "EPOCHS": 50,                     # - serve como default
 
     "EPOCHS_CV": 10,                  # max épocas por fold no CV
     "EPOCHS_FINAL": 40,               # max épocas do treino final (antes do teste final)

@@ -90,7 +90,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
     # K-fold cross-validation [Kohavi1995][Stone1974].
-    "KFOLDS": 2,
+    "KFOLDS": 5,
     # Seed p/ reprodutibilidade; ver boas práticas em [Goodfellow2016].
     "SEED": 42,
 
@@ -154,15 +154,15 @@ CONFIG: Dict[str, Any] = {
     # Treino
     # --------------------------------------------------------
     # Batch size afeta ruído do gradiente e generalização; trade-off clássico [Goodfellow2016].
-    "BATCH_SIZE": 16,
+    "BATCH_SIZE": 32,
 
     # Número máximo de épocas (limite superior).
     "EPOCHS": 50,                     # serve como default
 
     # Épocas máximas por fold; validação cruzada (CV) [Kohavi1995].
-    "EPOCHS_CV": 20,                  # max épocas por fold no CV
+    "EPOCHS_CV": 10,                  # max épocas por fold no CV
     # Treino final após escolher melhor modelo por CV; prática comum [Goodfellow2016].
-    "EPOCHS_FINAL": 30,               # max épocas do treino final (antes do teste final)
+    "EPOCHS_FINAL": 40,               # max épocas do treino final (antes do teste final)
 
     # LR base, agora usado como "initial_lr" do schedule (se habilitado).
     # Learning rate base; hiperparâmetro de maior impacto na otimização [Goodfellow2016].

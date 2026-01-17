@@ -9,7 +9,7 @@ Consome parâmetros de modelo treinado
 CNN Tradicional
 """
 
- ==================================================================================================
+# ==================================================================================================
 # NOTAS  / REFERÊNCIAS
 # --------------------------------------------------------------------------------------------------
 # Este script implementa um pipeline de *avaliação* (não-treino) para duas tarefas comuns em reconhecimento facial:

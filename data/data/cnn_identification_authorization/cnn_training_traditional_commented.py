@@ -90,7 +90,7 @@ CONFIG: Dict[str, Any] = {
     # Filtragem de classes
     # --------------------------------------------------------
     "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
-    "KFOLDS": 2,
+    "KFOLDS": 5,
     "SEED": 42,
 
     # --------------------------------------------------------
@@ -182,12 +182,12 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Treino
     # --------------------------------------------------------
-    "BATCH_SIZE": 16,
+    "BATCH_SIZE": 32,
 
     "EPOCHS": 50,                     # - serve como default
 
-    "EPOCHS_CV": 20,                  # max épocas por fold no CV
-    "EPOCHS_FINAL": 30,               # max épocas do treino final (antes do teste final)
+    "EPOCHS_CV": 10,                  # max épocas por fold no CV
+    "EPOCHS_FINAL": 40,               # max épocas do treino final (antes do teste final)
 
     # LR base, usado como "initial_lr" do schedule (se habilitado).
     "LR": 3e-4,
