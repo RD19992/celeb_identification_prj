@@ -284,7 +284,7 @@ CONFIG: Dict[str, Any] = {
     "RUNS_DIRNAME": "runs",
     "SAVE_MODEL": False,              # começa desabilitado (mantido) - salva modelos por fold no CV
 
-    # NOVO: salvar modelo final + pesos txt ao final
+    # Salvar modelo final + pesos txt ao final
     "SAVE_FINAL_MODEL": True,
     "FINAL_MODEL_FILENAME": "final_model_best.keras",
     "FINAL_WEIGHTS_TXT_FILENAME": "final_model_best_weights.txt",
