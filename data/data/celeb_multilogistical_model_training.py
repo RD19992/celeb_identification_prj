@@ -26,7 +26,7 @@ CONFIG = {
     "dataset_path": r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\celeba_hog_128x128_o9.joblib",
 
     # seleção de classes (prototipagem)
-    "frac_classes": 1.00,
+    "frac_classes": 0.005,
     "seed_classes": 42,
     "min_amostras_por_classe": 25,
 
@@ -343,8 +343,8 @@ def armijo_alpha_epoch(
 # Referência código SGD: H. Robbins and S. Monro, “A Stochastic Approximation Method,” Annals of Mathematical Statistics, 1951.
 # Referência Elastic Net: H. Zou and T. Hastie, “Regularization and Variable Selection via the Elastic Net,” J. Royal Statistical Society: Series B, 2005
 
-      - SGD: Robbins & Monro [10], Bottou [11]
-      - Elastic Net: Zou & Hastie [5]
+# SGD: Robbins & Monro [10], Bottou [11]
+# Elastic Net: Zou & Hastie [5]
 
 
 def treinar_softmax_elasticnet_sgd(

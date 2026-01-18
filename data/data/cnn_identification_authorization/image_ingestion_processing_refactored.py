@@ -33,7 +33,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 # =========================
 # CONFIGURAÇÕES
 # =========================
-TARGET_SIZE = 128  # resolução arbitrária (comece com 256)
+TARGET_SIZE = 128  # resolução arbitrária (comece com 128)
 SQUARE_CROP = True  # evita distorção (crop central p/ quadrado antes do resize)
 JPEG_QUALITY = 95
 
@@ -42,7 +42,7 @@ PERCENT_IMAGES = 1.00   # 1.0 = 100%
 MAX_IMAGES = None       # ex.: 5000 (ou None)
 
 # (Opcional) filtrar para as classes mais frequentes (para reduzir custo)
-TOP_CLASS_FRACTION = 0.20  # 1.0 = mantém todas as classes; ex.: 0.20 mantém top 20%
+TOP_CLASS_FRACTION = 0.2  # 1.0 = mantém todas as classes; ex.: 0.20 mantém top 20%
 
 # Amostras visuais
 N_SHOW_SAMPLES = 5
