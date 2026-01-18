@@ -88,7 +88,7 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes     mais frequentes
     # K-fold cross-validation [Kohavi1995][Stone1974].
     "KFOLDS": 5,
     # Seed p/ reprodutibilidade; ver boas práticas em [Goodfellow2016].
@@ -980,7 +980,7 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
 # Exponential decay é um baseline clássico (ver discussões em [Goodfellow2016]).
 def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     """
-    NOVO: Learning-rate schedule configurável.
+    Learning-rate schedule configurável.
 
     O TF espera decay_steps em "passos" (batches), então convertemos épocas -> passos:
       total_steps ~= steps_per_epoch * epochs
