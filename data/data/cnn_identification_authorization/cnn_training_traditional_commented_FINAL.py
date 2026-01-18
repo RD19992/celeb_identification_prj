@@ -89,8 +89,8 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
-    "KFOLDS": 5,
+    "TOP_CLASS_FRACTION": 1.00,       # top fração de classes mais frequentes
+    "KFOLDS": 2,
     "SEED": 42,
 
     # --------------------------------------------------------
@@ -186,7 +186,7 @@ CONFIG: Dict[str, Any] = {
 
     "EPOCHS": 50,                     # - serve como default
 
-    "EPOCHS_CV": 10,                  # max épocas por fold no CV
+    "EPOCHS_CV": 5,                  # max épocas por fold no CV
     "EPOCHS_FINAL": 40,               # max épocas do treino final (antes do teste final)
 
     # LR base, usado como "initial_lr" do schedule (se habilitado).
@@ -264,7 +264,7 @@ CONFIG: Dict[str, Any] = {
     "RUNS_DIRNAME": "runs",
     "SAVE_MODEL": False,              # começa desabilitado (mantido) - salva modelos por fold no CV
 
-    # NOVO: salvar modelo final + pesos txt ao final
+    # Salvar modelo final + pesos txt ao final
     "SAVE_FINAL_MODEL": True,
     "FINAL_MODEL_FILENAME": "final_model_best.keras",
     "FINAL_WEIGHTS_TXT_FILENAME": "final_model_best_weights.txt",
@@ -1438,7 +1438,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
 
 
     # --------------------------------------------------------
-    # (NOVO) Persistir o HOLDOUT FINAL (final_test_df) e o pool de CV (cv_df)
+    #        Persistir o HOLDOUT FINAL (final_test_df) e o pool de CV (cv_df)
     #        no run_dir, para que o script de avaliação reutilize exatamente
     #        o mesmo holdout e elimine risco de data leakage.
     #
