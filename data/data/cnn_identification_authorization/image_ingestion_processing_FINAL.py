@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 """
+
+EACH_USP: SIN-5016 - Aprendizado de Máquina
+Laura Silva Pelicer
+Renan Rios Diniz
+
+Código para ingestão do dataset CELEB-A e preparação para processamento
+
+
 CelebA - Ingestão RGB para CNN (resolução arbitrária)
 - Usa dataset já baixado em: data/celeba/img_align_celeba
 - Usa labels já existentes (identity_CelebA.txt e/ou labels.csv)
