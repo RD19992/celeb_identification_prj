@@ -1646,7 +1646,7 @@ def main():
         raise FileNotFoundError(f"Manifest não encontrado: {dataset_path}")
 
     # ------------------------------------------------------------
-    # (NOVO) Anti-leakage: se o script de treino salvou o holdout final
+    #        Anti-leakage: se o script de treino salvou o holdout final
     #        (final_test_manifest.csv) no run_dir, reutilizamos aqui.
     #        Opcionalmente, usamos cv_manifest.csv para o tuning.
     # ------------------------------------------------------------
