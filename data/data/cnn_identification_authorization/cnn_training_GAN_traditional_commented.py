@@ -82,15 +82,14 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Dados produzidos por script de ingestão
     # --------------------------------------------------------
-    "DATASET_DIR": Path(
-        r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\cnn_identification_authorization\cgan_outputs\run_20260117_221509\GAN_AUGMENTED_DATA"),
+    "DATASET_DIR": Path(r"C:\Users\riosd\PycharmProjects\celeb_identification_prj\data\data\cnn_identification_authorization\cgan_outputs\run_20260117_221509\GAN_AUGMENTED_DATA"),
     "MANIFEST_NAME": "manifest.csv",
     "ONLY_OK": True,                 # usa ok==True se a coluna existir
 
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
+    "TOP_CLASS_FRACTION": 1.00,   # top fração de classes mais frequentes
     "KFOLDS": 5,
     "SEED": 42,
 

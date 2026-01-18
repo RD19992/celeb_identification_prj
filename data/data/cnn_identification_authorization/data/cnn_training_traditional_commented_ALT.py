@@ -4,14 +4,7 @@ EACH_USP: SIN-5016 - Aprendizado de Máquina
 Laura Silva Pelicer
 Renan Rios Diniz
 
-Treinamento de CNN (ResNet "explicit") com K-Fold CV (sem sklearn).
-
-VERSÃO OTIMIZADA (GPU):
-- tf.data mais rápido (decode JPEG rápido, resize opcional, non-deterministic opcional)
-- mixed precision (opcional)
-- XLA/jit_compile nos passos de treino/val (opcional)
-- contadores/telemetria por step (para debugar CV)
-- confirmação da resolução REAL ingerida (sem resize), por amostragem
+Treinamento de CNN tradicional com K-Fold CV
 
 Arquivos gerados (por execução), dentro de:
   <DATASET_DIR>/runs/<YYYYMMDD_HHMMSS>/
@@ -22,30 +15,8 @@ Arquivos gerados (por execução), dentro de:
 - label2idx.json            (mapeamento label_original -> y_reindexado)
 - [opcional] models/*.keras (salvo apenas se SAVE_MODEL=True)
 
-Obs.: SAVE_MODEL começa DESABILITADO por padrão.
 
-------------------------------------------------------------
-AJUSTES PEDIDOS (SEM ALTERAR HIPERPARÂMETROS/LÓGICA):
-1) Comentários didáticos PT-BR em cada etapa.
-2) Opção configurável para forçar GPU (e opcionalmente falhar se não houver).
-3) Pós-treino: avaliação em "teste" (aqui: validação do melhor fold do CV),
-   erro, 10 exemplos aleatórios e matriz de confusão one-vs-all desses 10.
-------------------------------------------------------------
 
-------------------------------------------------------------
-NOVOS AJUSTES PEDIDOS (mantendo funcionalidades existentes):
-1) Definir um conjunto FINAL de teste, com % de classes configurável na seção de configuração.
-   - Aqui, "percentual de classes" = fração das classes (identidades) que terão imagens reservadas
-     para um TESTE FINAL (hold-out), ANTES do CV.
-   - Para cada classe escolhida, reservamos uma fração de imagens (FINAL_TEST_FRACTION_PER_CLASS),
-     garantindo que sobrem pelo menos KFOLDS exemplos para o CV daquela classe.
-2) Usar o melhor modelo treinado no CV para uso no conjunto de teste, com números de épocas
-   configuráveis separados para CV e treino final.
-   - Fluxo: CV em cv_df -> pega melhor fold/época -> usa esses pesos como inicialização
-     para um treino final (com val interno) -> avalia no TESTE FINAL.
-3) Early stopping de épocas para ambos (CV e treino final), com paciência 5 inicial.
-4) No final além de salvar o modelo salve também um txt com os pesos do melhor modelo.
-5) No Adam use um learning schedule, configurável.
 ------------------------------------------------------------
 """
 
@@ -58,28 +29,41 @@ import json
 import math
 import random
 import time
-import copy
 from typing import Dict, Tuple, List, Any, Optional, Set
-
 import numpy as np
 import pandas as pd
 import os
-
-# ============================================================
-# (1) SELEÇÃO DE ADAPTADOR / BACKEND (DirectML-friendly)
-# ============================================================
-# Este env var é típico do plugin DirectML: você pode "esconder"
-# outros adaptadores e deixar só o índice 0 visível.
-# (Mantido como estava, só comentado.)
-os.environ["DML_VISIBLE_DEVICES"] = "0"  # mantém apenas o adapter 0 (ex.: GPU discreta)
-
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 from tensorflow.keras import mixed_precision
 
-# Por padrão, você está fixando a política global em float32.
-# Isso evita surpresas de dtype e costuma ser mais estável em ambientes variados.
-# (Mantido como estava.)
+# ---------------------------------------------------------------------------
+# Referências
+# ---------------------------------------------------------------------------
+# Este script é uma implementação prática de um pipeline de treino/validação
+# de CNNs em Keras/TensorFlow.
+# Referências-base (citadas nos comentários):
+#  - [LeCun98] CNNs e conv/pooling na prática (LeCun et al., 1998)
+#  - [He15] ReLU/rectifiers e inicialização 'He' (He et al., 2015)
+#  - [Ioffe15] Batch Normalization (Ioffe & Szegedy, 2015)
+#  - [Srivastava14] Dropout (Srivastava et al., 2014)
+#  - [Krogh91] / [KroghHertz92] Weight decay / L2 como regularização
+#  - [KingmaBa14] Adam (Kingma & Ba, 2014)
+#  - [LoshchilovHutter16] Cosine annealing + warm restarts (SGDR)
+#  - [Prechelt97] Early stopping (critério via validação)
+#  - [Stone74] / [Kohavi95] (Stratified) K-fold cross-validation
+#  - [Russakovsky15] ImageNet (contexto para mean/std e benchmarks)
+#  - [Shorten19] Data augmentation (survey)
+#  - [Micikevicius17] Mixed precision training (FP16/FP32 + loss scaling)
+
+
+# ============================================================
+# (1) SELEÇÃO DE ADAPTADOR / BACKEND (DirectML-friendly)
+# ============================================================
+
+os.environ["DML_VISIBLE_DEVICES"] = "0"  # mantém apenas o adapter 0 (GPU discreta)
+
+
 mixed_precision.set_global_policy("float32")
 
 # >>> Logar onde cada op é colocado (CPU/GPU)
@@ -89,6 +73,11 @@ tf.debugging.set_log_device_placement(False)
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
+
+
+
+
+# ---------------------------------------------------------------------------
 CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Dados produzidos por script de ingestão
@@ -100,19 +89,12 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 1.00,       # top fração de classes mais frequentes (mantido)
-
-    # --------------------------------------------------------
-    # PEDIDO: frações separadas para seleção por CV vs treino final
-    # Observação: a filtragem efetiva usa TOP_CLASS_FRACTION_OVERRIDE quando definido.
-    # --------------------------------------------------------
-    "TOP_CLASS_FRACTION_CV": 0.005,    # 0,5% das classes (CV / seleção de arquitetura)
-    "TOP_CLASS_FRACTION_FINAL": 0.02,  # 2% das classes (treino final)
-    "KFOLDS": 2,
+    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
+    "KFOLDS": 5,
     "SEED": 42,
 
     # --------------------------------------------------------
-    # NOVO: Split de TESTE FINAL (hold-out ANTES do CV)
+    # Split de TESTE FINAL (hold-out ANTES do CV)
     # --------------------------------------------------------
     # Fração de classes (identidades) que participarão do teste final.
     # 1.0 => todas as classes elegíveis terão um pedaço reservado para teste.
@@ -123,67 +105,113 @@ CONFIG: Dict[str, Any] = {
     # Importante: garantimos que sobrem pelo menos KFOLDS imagens no conjunto do CV para essa classe.
     "FINAL_TEST_FRACTION_PER_CLASS": 0.20,
 
-    # NOVO: Para o treino final (antes do teste), separamos uma validação interna
+    # Para o treino final (antes do teste), separamos uma validação interna
     # (para early stopping do treino final), por classe.
     "FINAL_TRAIN_VAL_FRACTION_PER_CLASS": 0.20,
 
     # --------------------------------------------------------
     # Entrada
     # --------------------------------------------------------
+
+    # [LeCun98] define a motivação para operar em grades 2D (imagens) com
+    # convoluções e pooling; fixar resolução (IMG_SIZE) e canais.
+    # Normalização por média/desvio padrão é uma forma de padronização do input;
+    # os valores abaixo são o padrão do ImageNet (muito usado em CV), cf. [Russakovsky15].
     "IMG_SIZE": 128,
     "IN_CHANNELS": 3,
     "NORM_MEAN": (0.485, 0.456, 0.406),
     "NORM_STD":  (0.229, 0.224, 0.225),
 
     # --------------------------------------------------------
-    # Aumentação de dados (explícita, mínima)
+    # Aumentação de dados
     # --------------------------------------------------------
+
+    # Aumentação (flip/crop/jitter etc.) age como regularização “no espaço dos dados”,
+    # melhorando generalização quando o dataset efetivo é limitado ou enviesado.
+    # Ver síntese em [Shorten19].
     "AUG_HFLIP": True,
     "AUG_PAD": 4,                    # reflect-pad + random crop; 0 desabilita
 
     # --------------------------------------------------------
-    # ResNet mínima (explícita)
     # --------------------------------------------------------
-    "RES_LAYERS": [1, 1, 2, 2],          # blocks por estágio
-    "RES_CHANNELS": [32, 64, 96, 128],    # largura (canais) por estágio
-    "USE_BN": True,                  # BatchNorm (normalização em batch)
-    "ACTIVATION": "relu",
-    "BLOCK_DROPOUT": 0.1,
-    "HEAD_DROPOUT": 0.3,              # PEDIDO: dropout opcional só no head (após GAP)
+    # CNN tradicional
+    # --------------------------------------------------------
+    # Camadas: Conv2D -> MaxPool -> Conv2D -> MaxPool -> Flatten -> Dense -> Dense(softmax)
+    "CNN_CONV1_FILTERS": 32,
+    "CNN_CONV1_KERNEL": (3, 3),
+    "CNN_CONV1_STRIDES": (1, 1),
+    "CNN_CONV1_PADDING": "valid",
+    "CNN_CONV1_ACTIVATION": "relu",
+
+    "CNN_POOL1_SIZE": (2, 2),
+    "CNN_POOL1_STRIDES": (2, 2),
+
+    "CNN_CONV2_FILTERS": 64,
+    "CNN_CONV2_KERNEL": (3, 3),
+    "CNN_CONV2_STRIDES": (1, 1),
+    "CNN_CONV2_PADDING": "valid",
+    "CNN_CONV2_ACTIVATION": "relu",
+
+    "CNN_POOL2_SIZE": (2, 2),
+    "CNN_POOL2_STRIDES": (2, 2),
+
+    "CNN_DENSE_UNITS": 64,
+    "CNN_DENSE_ACTIVATION": "relu",
+
+    # Dropout opcional na "head"
+    "CNN_HEAD_DROPOUT": 0.3,
+
+    # Saída softmax
+    "CNN_OUTPUT_ACTIVATION": "softmax",
+
+    # Perda (categorical cross-entropy).
+    # Em problemas com MUITAS classes, SparseCategoricalCrossentropy é equivalente e costuma ser mais eficiente.
+    "USE_SPARSE_CE": True,
 
     # --------------------------------------------------------
     # Regularização
     # --------------------------------------------------------
-    "L2_WEIGHT": 1e-5,                # L2 no kernel de Conv/Dense
+
+    # Regularização:
+    #  - Dropout: desativa unidades aleatoriamente durante o treino para reduzir coadaptação
+    #    e overfitting [Srivastava14].
+    #  - L2/weight decay: penaliza pesos grandes;
+    #    [Krogh91] / [KroghHertz92].
+    "L2_WEIGHT": 1e-4,                # L2 no kernel de Conv/Dense
 
     # --------------------------------------------------------
     # Treino
     # --------------------------------------------------------
-    "BATCH_SIZE": 16,
+    "BATCH_SIZE": 32,
 
-    # Mantemos o campo antigo por compatibilidade mental com seu script,
-    # mas agora você tem épocas separadas para CV e treino final.
-    "EPOCHS": 50,                     # (mantido) - serve como default
+    "EPOCHS": 50,                     # - serve como default
 
-    "EPOCHS_CV": 20,                  # NOVO: max épocas por fold no CV
-    "EPOCHS_FINAL": 30,               # NOVO: max épocas do treino final (antes do teste final)
+    "EPOCHS_CV": 10,                  # max épocas por fold no CV
+    "EPOCHS_FINAL": 40,               # max épocas do treino final (antes do teste final)
 
-    # LR base (mantido), agora usado como "initial_lr" do schedule (se habilitado).
+    # LR base, usado como "initial_lr" do schedule (se habilitado).
     "LR": 3e-4,
 
     # --------------------------------------------------------
-    # NOVO: Early stopping
+    # Early stopping
     # --------------------------------------------------------
-    # Se quiser desligar, coloque 0.
+
+    # Early stopping interrompe o treino quando a métrica de validação para de melhorar,
+    # reduzindo overfitting e economizando compute. Critérios/prática em [Prechelt97].
+    # Desligar, colocar 0.
     "EARLY_STOPPING_PATIENCE_CV": 5,
     "EARLY_STOPPING_PATIENCE_FINAL": 10,
     "EARLY_STOPPING_MIN_DELTA": 0.0001,   # melhora mínima exigida (em termos de val_err)
 
     # --------------------------------------------------------
-    # NOVO: Learning-rate schedule (Adam)
+    # Learning-rate schedule (Adam)
     # --------------------------------------------------------
+
+    # Schedules de LR (decay/cosine/warm restarts) controlam o “tamanho do passo” ao longo
+    # do treino e costumam ser uma das alavancas mais fortes para convergência e generalização.
+    # Cosine annealing + warm restarts popularizou-se com SGDR [LoshchilovHutter16].
     # TYPE:
-    # - "constant" (mantém LR fixa igual ao seu script)
+    # - "constant"
     # - "exponential_decay"
     # - "cosine_decay"
     # - "cosine_decay_restarts"
@@ -215,13 +243,18 @@ CONFIG: Dict[str, Any] = {
     "JPEG_DCT_METHOD": "INTEGER_FAST",  # "INTEGER_FAST" ou "INTEGER_ACCURATE"
 
     # Mixed precision / XLA
-    "MIXED_PRECISION": False,          # tente True; se backend for "chato", deixe False
+    "MIXED_PRECISION": False,
     "XLA": False,                      # jit_compile=True nos passos
     "ALLOW_TF32": False,               # CUDA Ampere+: acelera matmul com TF32
 
     # Debug / contadores
     "LOG_EVERY_N_STEPS": 50,
     "PRINT_FIRST_BATCH_INFO": True,
+
+    # Matriz de confusão no conjunto de teste
+    "SAVE_CONFUSION_MATRIX": True,
+    # Segurança: evita explodir RAM/CSV em problemas com muitas classes
+    "CONFUSION_MATRIX_MAX_CLASSES": 500,
 
     # Confirmação de resolução (lê header JPEG; sem resize)
     "RESOLUTION_SAMPLE_N": 256,
@@ -237,7 +270,7 @@ CONFIG: Dict[str, Any] = {
     "FINAL_WEIGHTS_TXT_FILENAME": "final_model_best_weights.txt",
 
     # --------------------------------------------------------
-    # (2) NOVO: FORÇAR GPU / CPU (opcional) - sem mexer no resto
+    # (2) FORÇAR GPU / CPU (opcional)
     # --------------------------------------------------------
     # Se FORCE_GPU=True, tentamos travar o runtime para usar /GPU:0.
     # Se FORCE_GPU_STRICT=True e não houver GPU, levantamos erro.
@@ -251,17 +284,12 @@ CONFIG: Dict[str, Any] = {
     "PRINT_DEVICE_DIAGNOSTICS": True,
 }
 
-# Observação importante:
-# - CONFIG["DEVICE"] será definido *depois* que configurarmos os dispositivos,
-#   para respeitar FORCE_GPU/FORCE_CPU. Isso não muda os hiperparâmetros nem
-#   a lógica do treino; só controla onde o TF tenta alocar operações.
-
 
 # ============================================================
-# GPU/CPU SETUP (com opção de "forçar" GPU)
+# GPU/CPU SETUP
 # ============================================================
 def _print_visible_devices() -> None:
-    """Imprime dispositivos visíveis (útil para diagnosticar 'estou caindo na CPU')."""
+    """Imprime dispositivos visíveis (diagnóstico)."""
     try:
         vis = tf.config.get_visible_devices()
         print("[DBG] Visible devices:")
@@ -288,10 +316,8 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
     Ideia didática:
     - O TensorFlow pode enxergar GPU mas, se certos kernels não existirem
       (ou se o backend estiver mal instalado), ele faz fallback para CPU.
-    - Aqui, a gente tenta *guiar* o TF: visibilidade de devices e device scope.
 
     Importante:
-    - set_visible_devices deve ser feito cedo (antes do uso pesado de GPU).
     - Mesmo forçando /GPU:0, algumas ops podem cair na CPU se não houver kernel GPU.
     """
     force_cpu = bool(cfg.get("FORCE_CPU", False))
@@ -335,7 +361,7 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
 
         return "/GPU:0"
 
-    # Comportamento padrão (igual ao seu original): usa GPU se existir, senão CPU.
+    # Comportamento padrão: usa GPU se existir, senão CPU.
     if gpus:
         try:
             tf.config.set_visible_devices(gpus[0], "GPU")
@@ -351,7 +377,7 @@ def configure_devices(cfg: Dict[str, Any]) -> str:
     return "/CPU:0"
 
 
-# Configura e grava o device escolhido no CONFIG (sem mexer em hiperparâmetros)
+# Configura e grava o device escolhido no CONFIG
 CONFIG["DEVICE"] = configure_devices(CONFIG)
 
 if bool(CONFIG.get("PRINT_DEVICE_DIAGNOSTICS", True)):
@@ -471,7 +497,7 @@ def confirm_image_resolution(df: pd.DataFrame, cfg: Dict[str, Any], sample_n: Op
 
 
 # =========================
-# NOVO: SPLITS ESTRATIFICADOS (por classe) PARA HOLD-OUT
+# SPLITS ESTRATIFICADOS (por classe) PARA HOLD-OUT
 # =========================
 def _pick_holdout_classes(
     ys: List[int],
@@ -533,7 +559,7 @@ def stratified_holdout_split_by_class(
         if len(grp_idx) <= min_keep_per_class:
             continue
 
-        # RNG por classe para manter reproduzibilidade e evitar correlação esquisita
+        # RNG por classe para manter reproduzibilidade
         rng = np.random.default_rng(int(cfg["SEED"]) + int(seed_offset) + 10007 * int(y))
         rng.shuffle(grp_idx)
 
@@ -564,224 +590,91 @@ def stratified_holdout_split_by_class(
 
 
 # =========================
-# RESNET (EXPLICIT)
+# CNN TRADICIONAL
 # =========================
-def conv_bn_act(
-    x,
-    filters: int,
-    k: int,
-    stride: int,
-    use_bn: bool,
-    activation: str | None,
-    l2_weight: float,
-    name: str,
-):
-    """
-    Bloco didático: Conv2D -> (BN) -> (Ativação)
+def _as_tuple2(v, name: str) -> Tuple[int, int]:
+    """Aceita int, lista/tupla de 2 ints, ou string tipo "3,3" e devolve (a,b)."""
+    if isinstance(v, (tuple, list)) and len(v) == 2:
+        return int(v[0]), int(v[1])
+    if isinstance(v, int):
+        return int(v), int(v)
+    if isinstance(v, str):
+        parts = [p.strip() for p in v.replace(";", ",").split(",") if p.strip()]
+        if len(parts) == 1:
+            k = int(parts[0])
+            return k, k
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+    raise ValueError(f"Config inválida para {name}: {v!r} (esperado int ou par de ints)")
 
-    Convolução 2D (Conv2D) - explicação rápida e útil:
-    - Um filtro (kernel) kxk "desliza" sobre a imagem (feature map) e calcula
-      combinações lineares locais. Isso permite detectar padrões locais como
-      bordas, texturas e, em camadas profundas, partes de objetos/rostos.
-    - filters = número de kernels (ou "canais de saída") aprendidos.
-      Mais filters => mais capacidade de representar padrões.
-    - stride = passo do deslizamento:
-      stride=1 preserva mais resolução espacial.
-      stride=2 reduz a resolução (downsample) e aumenta campo receptivo efetivo.
-    - padding="same" mantém dimensões espaciais (aprox.) quando stride=1
-      e controla como bordas são tratadas.
-    - use_bias:
-      se usamos BatchNorm, normalmente removemos bias do Conv, porque BN já
-      aprende um deslocamento (beta) e escala (gamma).
+
+def build_cnn(cfg: Dict[str, Any], num_classes: int) -> Model:
     """
+    CNN tradicional:
+      Conv2D(32, (3,3), relu) -> MaxPool(2,2) ->
+      Conv2D(64, (3,3), relu) -> MaxPool(2,2) ->
+      Flatten -> Dense(128, relu) -> Dense(num_classes, softmax)
+
+    Todos os parâmetros são configuráveis via CONFIG (prefixo CNN_*).
+    Regularização L2 segue cfg["L2_WEIGHT"] (como no seu frame).
+    """
+    img_size = int(cfg["IMG_SIZE"])
+    in_ch = int(cfg["IN_CHANNELS"])
+
+    l2_w = float(cfg.get("L2_WEIGHT", 0.0))
+    kreg = (regularizers.l2(l2_w) if l2_w and l2_w > 0 else None)
+
+    conv1_filters = int(cfg["CNN_CONV1_FILTERS"])
+    conv1_kernel = _as_tuple2(cfg["CNN_CONV1_KERNEL"], "CNN_CONV1_KERNEL")
+    conv1_strides = _as_tuple2(cfg["CNN_CONV1_STRIDES"], "CNN_CONV1_STRIDES")
+    conv1_padding = str(cfg["CNN_CONV1_PADDING"]).lower()
+    conv1_act = str(cfg["CNN_CONV1_ACTIVATION"]).lower()
+
+    pool1_size = _as_tuple2(cfg["CNN_POOL1_SIZE"], "CNN_POOL1_SIZE")
+    pool1_strides = _as_tuple2(cfg["CNN_POOL1_STRIDES"], "CNN_POOL1_STRIDES")
+
+    conv2_filters = int(cfg["CNN_CONV2_FILTERS"])
+    conv2_kernel = _as_tuple2(cfg["CNN_CONV2_KERNEL"], "CNN_CONV2_KERNEL")
+    conv2_strides = _as_tuple2(cfg["CNN_CONV2_STRIDES"], "CNN_CONV2_STRIDES")
+    conv2_padding = str(cfg["CNN_CONV2_PADDING"]).lower()
+    conv2_act = str(cfg["CNN_CONV2_ACTIVATION"]).lower()
+
+    pool2_size = _as_tuple2(cfg["CNN_POOL2_SIZE"], "CNN_POOL2_SIZE")
+    pool2_strides = _as_tuple2(cfg["CNN_POOL2_STRIDES"], "CNN_POOL2_STRIDES")
+
+    dense_units = int(cfg["CNN_DENSE_UNITS"])
+    dense_act = str(cfg["CNN_DENSE_ACTIVATION"]).lower()
+    head_dropout = float(cfg.get("CNN_HEAD_DROPOUT", 0.0))
+
+    out_act = str(cfg.get("CNN_OUTPUT_ACTIVATION", "softmax")).lower()
+
+    inp = layers.Input(shape=(img_size, img_size, in_ch), name="input")
+
     x = layers.Conv2D(
-        filters, k, strides=stride, padding="same", use_bias=not use_bn,
-        kernel_regularizer=regularizers.l2(l2_weight),
-        name=f"{name}_conv{k}x{k}",
+        conv1_filters, conv1_kernel, strides=conv1_strides, padding=conv1_padding,
+        activation=conv1_act, kernel_regularizer=kreg, name="conv1"
+    )(inp)
+    x = layers.MaxPooling2D(pool_size=pool1_size, strides=pool1_strides, name="pool1")(x)
+
+    x = layers.Conv2D(
+        conv2_filters, conv2_kernel, strides=conv2_strides, padding=conv2_padding,
+        activation=conv2_act, kernel_regularizer=kreg, name="conv2"
+    )(x)
+    x = layers.MaxPooling2D(pool_size=pool2_size, strides=pool2_strides, name="pool2")(x)
+
+    x = layers.Flatten(name="flatten")(x)
+    x = layers.Dense(dense_units, activation=dense_act, kernel_regularizer=kreg, name="dense")(x)
+    if head_dropout and head_dropout > 0:
+        x = layers.Dropout(head_dropout, name="head_dropout")(x)
+
+    # Saída softmax (dtype float32 p/ estabilidade; importante com mixed precision)
+    out = layers.Dense(
+        num_classes, activation=out_act, kernel_regularizer=kreg, dtype="float32", name="probs"
     )(x)
 
-    # Batch Normalization:
-    # - estabiliza distribuições internas (por batch), melhora gradientes,
-    #   acelera convergência e costuma permitir taxas de aprendizado mais estáveis.
-    if use_bn:
-        x = layers.BatchNormalization(name=f"{name}_bn")(x)
+    return Model(inputs=inp, outputs=out, name="CNNTraditionalByTheBook")
 
-    # Ativação (ReLU por padrão):
-    # - introduz não-linearidade, permitindo a rede modelar funções complexas.
-    if activation is not None:
-        x = layers.Activation(activation, name=f"{name}_{activation}")(x)
-
-    return x
-
-
-def basic_res_block(
-    x,
-    filters: int,
-    stride: int,
-    use_bn: bool,
-    activation: str,
-    dropout_p: float,
-    l2_weight: float,
-    name: str,
-):
-    """
-    BasicBlock (ResNet "clássica" simplificada):
-      (3x3 -> BN -> Act) -> (3x3 -> BN) + skip -> Act
-
-    Ideia central da ResNet (residual learning):
-    - Em vez de aprender uma função direta F(x), o bloco aprende um "resíduo" R(x)
-      e soma de volta no input: y = x + R(x).
-    - Isso melhora o fluxo de gradientes e facilita treinar redes mais profundas
-      (reduz o problema de degradação ao aumentar profundidade).
-
-    Skip connection (atalho):
-    - Se stride!=1 (downsample) ou canais mudam, precisamos ajustar o atalho
-      com uma Conv 1x1 (projeção) para igualar forma (H,W,C).
-    """
-    shortcut = x
-    in_ch = x.shape[-1]
-    out_ch = filters
-
-    # Primeiro conv:
-    # - pode reduzir resolução (stride=2) em início de estágio
-    y = conv_bn_act(
-        x, filters=filters, k=3, stride=stride,
-        use_bn=use_bn, activation=activation, l2_weight=l2_weight,
-        name=f"{name}_c1",
-    )
-
-    # Segundo conv:
-    # - mantém resolução, termina o resíduo antes da soma
-    y = conv_bn_act(
-        y, filters=filters, k=3, stride=1,
-        use_bn=use_bn, activation=None, l2_weight=l2_weight,
-        name=f"{name}_c2",
-    )
-
-    # Dropout espacial (opcional):
-    # - zera canais inteiros (mais apropriado em convnets do que dropout "pixel a pixel")
-    if dropout_p and dropout_p > 0:
-        y = layers.SpatialDropout2D(dropout_p, name=f"{name}_drop")(y)
-
-    # Ajuste do atalho caso dimensões/canais não batam
-    if stride != 1 or (in_ch is not None and int(in_ch) != int(out_ch)):
-        shortcut = layers.Conv2D(
-            out_ch, 1, strides=stride, padding="same", use_bias=not use_bn,
-            kernel_regularizer=regularizers.l2(l2_weight),
-            name=f"{name}_skip_conv1x1",
-        )(shortcut)
-        if use_bn:
-            shortcut = layers.BatchNormalization(name=f"{name}_skip_bn")(shortcut)
-
-    # Soma residual + ativação final
-    out = layers.Add(name=f"{name}_add")([shortcut, y])
-    out = layers.Activation(activation, name=f"{name}_out_{activation}")(out)
-    return out
-
-
-def make_stage(
-    x,
-    filters: int,
-    n_blocks: int,
-    first_stride: int,
-    use_bn: bool,
-    activation: str,
-    dropout_p: float,
-    l2_weight: float,
-    name: str,
-):
-    """
-    Um "estágio" da ResNet = sequência de BasicBlocks com mesma largura (filters),
-    onde o primeiro bloco do estágio pode fazer downsample (first_stride=2).
-
-    Didática: como "escalar" a ResNet sem mudar a lógica:
-    - Mais profundidade: aumente RES_LAYERS (mais blocos por estágio).
-    - Mais largura: aumente RES_CHANNELS (mais filters por estágio).
-    - Mais estágios: estender listas RES_LAYERS/RES_CHANNELS (ex.: adicionar stage4).
-    Observação: aqui manteremos exatamente os valores do seu CONFIG.
-    """
-    x = basic_res_block(
-        x, filters=filters, stride=first_stride,
-        use_bn=use_bn, activation=activation,
-        dropout_p=dropout_p, l2_weight=l2_weight,
-        name=f"{name}_b1",
-    )
-    for i in range(2, n_blocks + 1):
-        x = basic_res_block(
-            x, filters=filters, stride=1,
-            use_bn=use_bn, activation=activation,
-            dropout_p=dropout_p, l2_weight=l2_weight,
-            name=f"{name}_b{i}",
-        )
-    return x
-
-
-def build_min_resnet(cfg: Dict[str, Any], num_classes: int) -> Model:
-    """
-    Minimal ResNet (explicit):
-      stem -> stages -> GAP -> Dense(logits)
-
-    Explicação do "stem" (arquitetura inicial):
-    - Em ResNets maiores, o stem costuma ser algo como 7x7 stride 2 + maxpool.
-    - Aqui vocês usam um stem minimalista: Conv 3x3 stride 1.
-      Isso mantém resolução e reduz complexidade (bom para IMG_SIZE pequeno).
-
-    GAP (GlobalAveragePooling2D):
-    - Em vez de flattenar tudo (muitos parâmetros), faz média por canal.
-    - Reduz overfitting e torna a rede mais "consciente" de presença de features.
-
-    Dense(logits):
-    - Saída em logits (sem softmax), pois a loss usa from_logits=True.
-    """
-    inp = layers.Input(
-        shape=(cfg["IMG_SIZE"], cfg["IMG_SIZE"], cfg["IN_CHANNELS"]),
-        name="input",
-    )
-
-    # STEM: primeira camada conv (feature extractor inicial)
-    x = conv_bn_act(
-        inp, filters=cfg["RES_CHANNELS"][0], k=3, stride=1,
-        use_bn=cfg["USE_BN"], activation=cfg["ACTIVATION"],
-        l2_weight=cfg["L2_WEIGHT"], name="stem",
-    )
-
-    # STAGES: empilhamento residual
-    layers_per_stage = cfg["RES_LAYERS"]
-    chs = cfg["RES_CHANNELS"]
-    for s, (n_blocks, filters) in enumerate(zip(layers_per_stage, chs), start=1):
-        # Estratégia padrão:
-        # - estágio 1: stride 1 (sem downsample)
-        # - estágios seguintes: stride 2 no primeiro bloco (downsample)
-        stride = 1 if s == 1 else 2
-        x = make_stage(
-            x, filters=filters, n_blocks=n_blocks, first_stride=stride,
-            use_bn=cfg["USE_BN"], activation=cfg["ACTIVATION"],
-            dropout_p=cfg["BLOCK_DROPOUT"], l2_weight=cfg["L2_WEIGHT"],
-            name=f"stage{s}",
-        )
-
-    # Pooling global (reduz HxW para 1 por canal)
-    x = layers.GlobalAveragePooling2D(name="gap")(x)
-
-    # PEDIDO: dropout específico no head (após GAP), além do dropout nos blocos
-    head_do = float(cfg.get("HEAD_DROPOUT", 0.0))
-    if head_do and head_do > 0.0:
-        x = layers.Dropout(head_do, name="head_dropout")(x)
-
-
-    # Camada final: logits (dtype float32 para estabilidade, especialmente se mixed precision)
-    logits = layers.Dense(
-        num_classes,
-        kernel_regularizer=regularizers.l2(cfg["L2_WEIGHT"]),
-        dtype="float32",
-        name="logits",
-    )(x)
-
-    return Model(inputs=inp, outputs=logits, name="ResNetSmallExplicit")
-
-
-# =========================
-# DATA LOADING + STRATIFIED KFOLD (NO SKLEARN)
+# DATA LOADING + STRATIFIED KFOLD
 # =========================
 def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[int, int]]:
     """
@@ -816,9 +709,8 @@ def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[in
     if df.empty:
         raise RuntimeError("No valid images after filtering by file existence / ok flag.")
 
-    # Top classes por frequência (mantido)
-    # Permite rodar CV/seleção e treino final com frações diferentes sem mexer no resto do CONFIG.
-    top_fraction = float(cfg.get("TOP_CLASS_FRACTION_OVERRIDE", cfg["TOP_CLASS_FRACTION"]))
+    # Top classes por frequência
+    top_fraction = cfg["TOP_CLASS_FRACTION"]
     if not (0 < top_fraction <= 1.0):
         raise ValueError("TOP_CLASS_FRACTION must be in (0,1].")
 
@@ -850,7 +742,7 @@ def load_and_filter_manifest(cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[in
 
 def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
-    K-Fold estratificado (sem sklearn):
+    K-Fold estratificado:
     - Para cada classe y: embaralha índices e divide em k "chunks".
     - Fold i: validação = chunk i de cada classe; treino = resto.
 
@@ -876,7 +768,7 @@ def stratified_kfold_indices(df: pd.DataFrame, k: int, seed: int) -> List[Tuple[
 
 
 # =========================
-# TF.DATA PIPELINE (FAST)
+# TF.DATA PIPELINE
 # =========================
 def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
     """
@@ -971,13 +863,13 @@ def make_tf_dataset(df: pd.DataFrame, cfg: Dict[str, Any], training: bool):
 # =========================
 def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     """
-    NOVO: Learning-rate schedule configurável.
+    Learning-rate schedule configurável.
 
     O TF espera decay_steps em "passos" (batches), então convertemos épocas -> passos:
       total_steps ~= steps_per_epoch * epochs
 
     Tipos implementados:
-    - constant (igual ao script antigo)
+    - constant
     - exponential_decay
     - cosine_decay
     - cosine_decay_restarts
@@ -1032,8 +924,8 @@ def make_learning_rate(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: in
 
 def make_optimizer(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     """
-    Otimizador Adam (mantido), agora com learning-rate schedule configurável (NOVO).
-    Se MIXED_PRECISION=True, encapsula com LossScaleOptimizer (mantido).
+    Otimizador Adam, agora com learning-rate schedule configurável.
+    Se MIXED_PRECISION=True, encapsula com LossScaleOptimizer.
     """
     lr = make_learning_rate(cfg, steps_per_epoch=steps_per_epoch, epochs_max=epochs_max)
     opt = tf.keras.optimizers.Adam(learning_rate=lr)
@@ -1046,14 +938,23 @@ def make_optimizer(cfg: Dict[str, Any], steps_per_epoch: int, epochs_max: int):
     return opt
 
 
-def make_loss():
+def make_loss(cfg: Dict[str, Any], num_classes: int):
     """
-    SparseCategoricalCrossentropy:
-    - rótulos inteiros (0..C-1)
-    - from_logits=True porque o modelo retorna logits (sem softmax)
-    """
-    return tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    Perda: Categorical Cross-Entropy + saída softmax.
 
+    - Default (USE_SPARSE_CE=False): usa CategoricalCrossentropy (one-hot internamente).
+    - Opcional (USE_SPARSE_CE=True): usa SparseCategoricalCrossentropy (equivalente e mais eficiente).
+    """
+    if bool(cfg.get("USE_SPARSE_CE", False)):
+        return tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+
+    ce = tf.keras.losses.CategoricalCrossentropy(from_logits=False)
+
+    def _loss(y_int, y_pred):
+        y_oh = tf.one_hot(tf.cast(y_int, tf.int32), depth=int(num_classes))
+        return ce(y_oh, y_pred)
+
+    return _loss
 
 # =========================
 # TRAIN / EVAL (FAST + COUNTERS)
@@ -1071,7 +972,7 @@ def train_one_epoch(
     Treina 1 época em um fold.
 
     Didática:
-    - forward: model(x, training=True) -> logits
+    - forward: model(x, training=True) -> probs (softmax)
     - loss: cross-entropy + regularização L2 (model.losses)
     - backward: gradientes via GradientTape
     - apply: optimizer.apply_gradients
@@ -1083,10 +984,10 @@ def train_one_epoch(
     @tf.function(jit_compile=xla)
     def train_step(x, y):
         with tf.GradientTape() as tape:
-            logits = model(x, training=True)
+            probs = model(x, training=True)
 
             # Loss base sempre em float32 (estabilidade numérica)
-            base_loss = loss_fn(y, tf.cast(logits, tf.float32))
+            base_loss = loss_fn(y, tf.cast(probs, tf.float32))
             base_loss = tf.cast(base_loss, tf.float32)
 
             # Regularização (L2) também em float32
@@ -1097,7 +998,7 @@ def train_one_epoch(
 
             loss = base_loss + reg_loss
 
-        # Mixed precision loss scaling (mantido)
+        # Mixed precision loss scaling
         if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer) or (
                 hasattr(optimizer, "get_scaled_loss") and hasattr(optimizer, "get_unscaled_gradients")
         ):
@@ -1107,7 +1008,7 @@ def train_one_epoch(
         else:
             grads = tape.gradient(loss, model.trainable_variables)
 
-        # Filtra gradientes None (mantido)
+        # Filtra gradientes None
         grads_and_vars = [(g, v) for (g, v) in zip(grads, model.trainable_variables) if g is not None]
         if not grads_and_vars:
             raise RuntimeError(
@@ -1116,7 +1017,7 @@ def train_one_epoch(
 
         optimizer.apply_gradients(grads_and_vars)
 
-        preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
+        preds = tf.argmax(probs, axis=-1, output_type=tf.int32)
         correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
         batch_n = tf.shape(y)[0]
         return loss, correct, batch_n
@@ -1138,7 +1039,7 @@ def train_one_epoch(
         total_correct += int(correct.numpy())
         total_seen += bn
 
-        # Debug do primeiro batch (muito útil para ver device/dtype)
+        # Debug do primeiro batch (device/dtype)
         if bool(cfg.get("PRINT_FIRST_BATCH_INFO", True)) and not first_batch_printed:
             first_batch_printed = True
             try:
@@ -1179,9 +1080,9 @@ def evaluate(model: Model, ds, loss_fn, cfg: Dict[str, Any]):
 
     @tf.function(jit_compile=xla)
     def val_step(x, y):
-        logits = model(x, training=False)
+        probs = model(x, training=False)
 
-        base_loss = loss_fn(y, tf.cast(logits, tf.float32))
+        base_loss = loss_fn(y, tf.cast(probs, tf.float32))
         base_loss = tf.cast(base_loss, tf.float32)
 
         if model.losses:
@@ -1191,7 +1092,7 @@ def evaluate(model: Model, ds, loss_fn, cfg: Dict[str, Any]):
 
         loss = base_loss + reg_loss
 
-        preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
+        preds = tf.argmax(probs, axis=-1, output_type=tf.int32)
         correct = tf.reduce_sum(tf.cast(tf.equal(preds, tf.cast(y, tf.int32)), tf.int32))
         batch_n = tf.shape(y)[0]
         return loss, correct, batch_n
@@ -1214,7 +1115,7 @@ def evaluate(model: Model, ds, loss_fn, cfg: Dict[str, Any]):
 
 
 # ============================================================
-# (3) PÓS-TREINO: "TESTE" + 10 EXEMPLOS + ONE-VS-ALL
+# PÓS-TREINO: "TESTE" + 10 EXEMPLOS + ONE-VS-ALL
 # ============================================================
 def _preprocess_single_image(path: str, cfg: Dict[str, Any]) -> tf.Tensor:
     """
@@ -1269,6 +1170,42 @@ def _one_vs_all_confusion(y_true: np.ndarray, y_pred: np.ndarray, classes: List[
     return pd.DataFrame(rows)
 
 
+
+def compute_confusion_matrix(
+    model: Model,
+    ds,
+    num_classes: int,
+    cfg: Dict[str, Any],
+) -> Optional[np.ndarray]:
+    """
+    Calcula matriz de confusão (y_true x y_pred) no dataset ds.
+
+    Para datasets com muitas classes, isso pode ficar enorme. Por isso:
+    - só calcula se SAVE_CONFUSION_MATRIX=True e num_classes <= CONFUSION_MATRIX_MAX_CLASSES.
+    """
+    if not bool(cfg.get("SAVE_CONFUSION_MATRIX", True)):
+        return None
+
+    max_c = int(cfg.get("CONFUSION_MATRIX_MAX_CLASSES", 500))
+    if int(num_classes) > max_c:
+        print(f"[POST] Confusion matrix pulada: num_classes={num_classes} > CONFUSION_MATRIX_MAX_CLASSES={max_c}")
+        return None
+
+    cm = np.zeros((int(num_classes), int(num_classes)), dtype=np.int64)
+
+    for batch in ds:
+        x, y = batch
+        probs = model(x, training=False)
+        preds = tf.argmax(probs, axis=-1, output_type=tf.int32)
+
+        y_np = y.numpy().astype(np.int64)
+        p_np = preds.numpy().astype(np.int64)
+
+        # Atualiza contagens (vectorizado por índice)
+        np.add.at(cm, (y_np, p_np), 1)
+
+    return cm
+
 def post_training_test_report(
     cfg: Dict[str, Any],
     run_dir: Path,
@@ -1285,12 +1222,12 @@ def post_training_test_report(
     - Imprime erro/acc/loss e mostra 10 exemplos aleatórios com predições.
     - Gera matriz one-vs-all para esses 10 exemplos.
 
-    Observação didática (mantida):
+    Observação didática:
     - Em K-Fold CV, não existe um test set único por padrão.
       O mais honesto, sem mudar sua lógica, é tratar o fold segurado (val) como "teste"
       do melhor fold (held-out).
 
-    NOVO: agora também pode ser usado com um TESTE FINAL real (hold-out antes do CV),
+    Também pode ser usado com um TESTE FINAL real (hold-out antes do CV),
     mantendo a mesma lógica de relatório.
     """
     print("\n" + "=" * 80)
@@ -1305,14 +1242,27 @@ def post_training_test_report(
 
     # Reconstrói e aplica pesos
     with tf.device(cfg["DEVICE"]):
-        model = build_min_resnet(cfg, num_classes=num_classes)
+        model = build_cnn(cfg, num_classes=num_classes)
     model.set_weights(best_weights)
 
-    loss_fn = make_loss()
+    loss_fn = make_loss(cfg, num_classes)
     te_loss, te_acc, te_err = evaluate(model, test_ds, loss_fn, cfg)
 
     print(f"[TEST] loss={te_loss:.6f} acc={te_acc:.6f} err={te_err:.6f}")
     print(f"[TEST] n={len(df_val_as_test)} classes={num_classes} device={cfg['DEVICE']}")
+
+    # --------------------------------------------------------
+    # Matriz de confusão no conjunto de teste
+    # --------------------------------------------------------
+    cm = compute_confusion_matrix(model, test_ds, num_classes=num_classes, cfg=cfg)
+    if cm is not None:
+        try:
+            cm_path = run_dir / "confusion_matrix_test.csv"
+            pd.DataFrame(cm).to_csv(cm_path, index=False, encoding="utf-8")
+            print(f"[SAVED] {cm_path}")
+        except Exception as e:
+            print("[WARN] Could not save confusion matrix:", e)
+
 
     # --------------------------------------------------------
     # 10 exemplos aleatórios de predição
@@ -1336,9 +1286,9 @@ def post_training_test_report(
         img = _preprocess_single_image(p, cfg)
         x = tf.expand_dims(img, axis=0)  # [1,H,W,C]
 
-        # Predição (logits -> softmax para prob)
-        logits = model(x, training=False)
-        probs = tf.nn.softmax(tf.cast(logits, tf.float32), axis=-1)[0].numpy()
+        # Predição (saída já é softmax)
+        probs = model(x, training=False)
+        probs = tf.cast(probs, tf.float32)[0].numpy()
 
         y_pred = int(np.argmax(probs))
         label_pred_original = int(idx2label.get(y_pred, -1))
@@ -1368,7 +1318,7 @@ def post_training_test_report(
     print("\n[POST] Matriz de confusão one-vs-all (apenas para os 10 exemplos acima):")
     print(ova_df.to_string(index=False))
 
-    # Opcional: salvar relatórios no run_dir (não muda lógica do treino; só logging)
+    # Opcional: salvar relatórios no run_dir
     try:
         ova_path = run_dir / "post_one_vs_all_10examples.csv"
         ova_df.to_csv(ova_path, index=False, encoding="utf-8")
@@ -1383,7 +1333,7 @@ def post_training_test_report(
 
 
 # =========================
-# NOVO: salvar pesos em TXT
+# Salvar pesos em TXT
 # =========================
 def save_model_weights_txt(model: Model, path: Path) -> None:
     """
@@ -1432,10 +1382,8 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     Executa K-Fold CV e grava arquivos de log.
     Retorna: (cv_mean_best_val_err, run_dir)
 
-    Além disso (ajuste pedido):
+    Além disso:
     - Guarda o "melhor fold" (menor val_err) e faz um relatório final nele.
-
-    NOVO:
     - Antes do CV, cria um TESTE FINAL (hold-out) com % de classes configurável.
     - Após o CV, usa o melhor modelo do CV como inicialização e faz um treino final
       (com val interno + early stopping) e avalia no TESTE FINAL.
@@ -1449,7 +1397,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     confirm_image_resolution(df_full, cfg)
 
     # --------------------------------------------------------
-    # NOVO: split TESTE FINAL antes do CV
+    # Split TESTE FINAL antes do CV
     # --------------------------------------------------------
     cv_df, final_test_df, test_classes = stratified_holdout_split_by_class(
         df=df_full,
@@ -1471,11 +1419,11 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     if len(final_test_df) == 0:
         print("[WARN] final_test_df ficou vazio. Ajuste FINAL_TEST_* para reservar imagens de teste.")
     else:
-        # Só para ter um diagnóstico rápido do teste final:
+        # Diagnóstico rápido do teste final:
         print(f"[INFO] final_test classes presentes={final_test_df['y'].nunique()}")
 
     # --------------------------------------------------------
-    # CV propriamente dito (agora em cima de cv_df)
+    # CV propriamente dito (em cima de cv_df)
     # --------------------------------------------------------
     k = int(cfg["KFOLDS"])
     folds = stratified_kfold_indices(cv_df, k=k, seed=int(cfg["SEED"]))
@@ -1487,6 +1435,32 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
 
     save_json(cfg, run_dir / "hyperparameters.json")
     save_json({str(k): int(v) for k, v in label2idx.items()}, run_dir / "label2idx.json")
+
+
+    # --------------------------------------------------------
+    # (NOVO) Persistir o HOLDOUT FINAL (final_test_df) e o pool de CV (cv_df)
+    #        no run_dir, para que o script de avaliação reutilize exatamente
+    #        o mesmo holdout e elimine risco de data leakage.
+    #
+    # Arquivos gerados:
+    # - final_test_manifest.csv  -> apenas exemplos do holdout FINAL TEST
+    # - cv_manifest.csv          -> pool restante (usado no CV/treino)
+    # --------------------------------------------------------
+    try:
+        final_test_manifest = run_dir / "final_test_manifest.csv"
+        cv_manifest = run_dir / "cv_manifest.csv"
+
+        # Salvar apenas colunas essenciais (mantém compatibilidade com carregar_dataset_manifest_csv)
+        cols = [c for c in ("dst", "label", "y", "ok") if c in final_test_df.columns]
+        final_test_df[cols].to_csv(final_test_manifest, index=False, encoding="utf-8")
+
+        cols_cv = [c for c in ("dst", "label", "y", "ok") if c in cv_df.columns]
+        cv_df[cols_cv].to_csv(cv_manifest, index=False, encoding="utf-8")
+
+        print(f"[INFO] Holdout FINAL TEST salvo em: {final_test_manifest}")
+        print(f"[INFO] Pool de CV salvo em: {cv_manifest}")
+    except Exception as e:
+        print(f"[WARN] Falha ao salvar manifests de split (holdout/CV): {e}")
 
     errors_csv = run_dir / "run_errors.csv"
     with errors_csv.open("w", newline="", encoding="utf-8") as f:
@@ -1501,7 +1475,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         fold_summaries = []
         best_val_errs = []
 
-        # Ajuste pedido: guardar o melhor fold global para "teste" final
+        # Guardar o melhor fold global para "teste" final
         best_global_val_err = float("inf")
         best_global_weights: Optional[List[np.ndarray]] = None
         best_global_val_df: Optional[pd.DataFrame] = None
@@ -1527,13 +1501,13 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
 
             # Cria modelo no device desejado
             with tf.device(cfg["DEVICE"]):
-                model = build_min_resnet(cfg, num_classes=num_classes)
+                model = build_cnn(cfg, num_classes=num_classes)
 
-            # NOVO: optimizer agora recebe steps_per_epoch e epochs_max (para o schedule)
+            # Optimizer recebe steps_per_epoch e epochs_max (para o schedule)
             steps_per_epoch = int(math.ceil(len(train_df) / max(1, int(cfg["BATCH_SIZE"]))))
             optimizer = make_optimizer(cfg, steps_per_epoch=steps_per_epoch, epochs_max=epochs_cv)
 
-            loss_fn = make_loss()
+            loss_fn = make_loss(cfg, num_classes)
 
             best_val_err = float("inf")
             best_epoch = -1
@@ -1591,7 +1565,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
                 "best_val_err": best_val_err,
             })
 
-            # Guarda o melhor fold global para o relatório final (ajuste pedido)
+            # Guarda o melhor fold global para o relatório final
             if best_val_err < best_global_val_err and best_weights is not None:
                 best_global_val_err = float(best_val_err)
                 best_global_weights = best_weights
@@ -1599,7 +1573,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
                 best_global_fold_i = int(fold_i)
                 best_global_epoch = int(best_epoch)
 
-            # Salva modelo (opcional, mantido)
+            # Salva modelo (opcional)
             if bool(cfg.get("SAVE_MODEL", False)):
                 models_dir = run_dir / "models"
                 ensure_dir(models_dir)
@@ -1639,7 +1613,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
     print(f"[FILES] {run_dir}")
 
     # --------------------------------------------------------
-    # Ajuste antigo (3): relatório final no melhor fold (val como "teste")
+    # Ajuste antigo: relatório final no melhor fold (val como "teste")
     # --------------------------------------------------------
     try:
         if best_global_weights is not None and best_global_val_df is not None:
@@ -1659,7 +1633,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         print("[WARN] Post-training report failed:", e)
 
     # --------------------------------------------------------
-    # NOVO: TREINO FINAL (inicializa com melhor modelo do CV) + TESTE FINAL
+    # TREINO FINAL (inicializa com melhor modelo do CV) + TESTE FINAL
     # --------------------------------------------------------
     try:
         if best_global_weights is None:
@@ -1696,10 +1670,10 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         set_seed(int(cfg["SEED"]) + 777_777)
 
         with tf.device(cfg["DEVICE"]):
-            final_model = build_min_resnet(cfg, num_classes=num_classes)
+            final_model = build_cnn(cfg, num_classes=num_classes)
         final_model.set_weights(best_global_weights)
 
-        loss_fn = make_loss()
+        loss_fn = make_loss(cfg, num_classes)
 
         # Diagnóstico: avalia no teste final ANTES do treino final (apenas para referência)
         pre_loss, pre_acc, pre_err = evaluate(final_model, final_test_ds, loss_fn, cfg)
@@ -1798,7 +1772,7 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
         except Exception as e:
             print("[WARN] post_training_test_report on FINAL TEST failed:", e)
 
-        # Salvar modelo final + pesos txt (pedido)
+        # Salvar modelo final + pesos txt
         if bool(cfg.get("SAVE_FINAL_MODEL", True)):
             models_dir = run_dir / "models"
             ensure_dir(models_dir)
@@ -1823,67 +1797,47 @@ def run_kfold_cv(cfg: Dict[str, Any]) -> Tuple[float, Path]:
 # =========================
 def main() -> float:
     """
-    Treina ResNet 'explicit' com K-Fold CV.
+    Treina CNN tradicional (by the book) com K-Fold CV.
     Retorna o erro médio (val_err) dos melhores epochs por fold.
     """
     print("[INFO] Using device:", CONFIG["DEVICE"])
-
-    # --------------------------------------------------------
-    # PEDIDO: usar a CV existente para escolher entre 6 arquiteturas
-    # (com subset pequeno de classes para baratear a busca)
-    # --------------------------------------------------------
-    arch_candidates = [
-        {"name": "C64-96-128_L111", "RES_CHANNELS": [64, 96, 128], "RES_LAYERS": [1, 1, 1]},
-        {"name": "C64-96-128_L112", "RES_CHANNELS": [64, 96, 128], "RES_LAYERS": [1, 1, 2]},
-        {"name": "C64-96-128_L122", "RES_CHANNELS": [64, 96, 128], "RES_LAYERS": [1, 2, 2]},
-        {"name": "C32-64-96-128_L1111", "RES_CHANNELS": [32, 64, 96, 128], "RES_LAYERS": [1, 1, 1, 1]},
-        {"name": "C32-64-96-128_L1122", "RES_CHANNELS": [32, 64, 96, 128], "RES_LAYERS": [1, 1, 2, 2]},
-        {"name": "C32-64-96-128_L2222", "RES_CHANNELS": [32, 64, 96, 128], "RES_LAYERS": [2, 2, 2, 2]},
-    ]
-
-    cv_fraction = float(CONFIG.get("TOP_CLASS_FRACTION_CV", CONFIG["TOP_CLASS_FRACTION"]))
-    best = None
-    best_err = float("inf")
-
-    for cand in arch_candidates:
-        cfg_try = copy.deepcopy(CONFIG)
-        cfg_try["RES_CHANNELS"] = cand["RES_CHANNELS"]
-        cfg_try["RES_LAYERS"] = cand["RES_LAYERS"]
-        cfg_try["TOP_CLASS_FRACTION_OVERRIDE"] = cv_fraction
-
-        print("\n" + "=" * 80)
-        print(
-            f"[ARCH SEARCH] {cand['name']} | "
-            f"RES_CHANNELS={cand['RES_CHANNELS']} | "
-            f"RES_LAYERS={cand['RES_LAYERS']} | "
-            f"TOP_CLASS_FRACTION_OVERRIDE={cv_fraction}"
-        )
-        mean_err, _run_dir = run_kfold_cv(cfg_try)
-
-        if float(mean_err) < best_err:
-            best_err = float(mean_err)
-            best = cand
-
-    if best is None:
-        raise RuntimeError("Architecture search failed: no candidate produced a result.")
-
-    print("\n" + "=" * 80)
-    print(f"[ARCH SEARCH] BEST = {best['name']} | mean_best_val_err={best_err}")
-
-    # --------------------------------------------------------
-    # PEDIDO: treino final com fração separada de classes
-    # --------------------------------------------------------
-    final_fraction = float(CONFIG.get("TOP_CLASS_FRACTION_FINAL", CONFIG["TOP_CLASS_FRACTION"]))
-    cfg_final = copy.deepcopy(CONFIG)
-    cfg_final["RES_CHANNELS"] = best["RES_CHANNELS"]
-    cfg_final["RES_LAYERS"] = best["RES_LAYERS"]
-    cfg_final["TOP_CLASS_FRACTION_OVERRIDE"] = final_fraction
-
-    print("\n" + "=" * 80)
-    print(f"[FINAL] Using BEST architecture | TOP_CLASS_FRACTION_OVERRIDE={final_fraction}")
-    mean_err, _run_dir = run_kfold_cv(cfg_final)
+    mean_err, _run_dir = run_kfold_cv(CONFIG)
     return mean_err
 
+
+# ===========================================================================
+# REFERÊNCIAS (para citação acadêmica)
+# ===========================================================================
+# [LeCun98] LeCun, Y., Bottou, L., Bengio, Y., & Haffner, P. (1998).
+#          Gradient-based learning applied to document recognition.
+#          Proceedings of the IEEE.
+# [He15]   He, K., Zhang, X., Ren, S., & Sun, J. (2015).
+#          Delving Deep into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification.
+#          arXiv:1502.01852.
+# [Ioffe15] Ioffe, S., & Szegedy, C. (2015). Batch Normalization: Accelerating Deep Network Training...
+#          arXiv:1502.03167.
+# [Srivastava14] Srivastava, N. et al. (2014). Dropout: A Simple Way to Prevent Neural Networks from Overfitting.
+#          JMLR 15.
+# [Krogh91] Krogh, A., & Hertz, J. A. (1991). A Simple Weight Decay Can Improve Generalization.
+#          NeurIPS.
+# [KroghHertz92] Versão estendida/relacionada frequentemente citada como 1992 em bibliografias.
+# [KingmaBa14] Kingma, D. P., & Ba, J. (2014). Adam: A Method for Stochastic Optimization.
+#          arXiv:1412.6980.
+# [LoshchilovHutter16] Loshchilov, I., & Hutter, F. (2016/2017). SGDR: Stochastic Gradient Descent with Warm Restarts.
+#          arXiv:1608.03983 (ICLR 2017).
+# [Prechelt97] Prechelt, L. (1997). Early Stopping — But When?
+#          (técnicas de parada via validação; frequentemente citado em compilações/ebooks).
+# [Stone74] Stone, M. (1974). Cross-validatory choice and assessment of statistical predictions.
+#          JRSS Series B.
+# [Kohavi95] Kohavi, R. (1995). A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection.
+#          IJCAI.
+# [Russakovsky15] Russakovsky, O. et al. (2015). ImageNet Large Scale Visual Recognition Challenge.
+#          IJCV.
+# [Shorten19] Shorten, C., & Khoshgoftaar, T. M. (2019). A survey on Image Data Augmentation for Deep Learning.
+#          Journal of Big Data.
+# [Micikevicius17] Micikevicius, P. et al. (2017). Mixed Precision Training.
+#          arXiv:1710.03740.
+# ===========================================================================
 
 if __name__ == "__main__":
     main()

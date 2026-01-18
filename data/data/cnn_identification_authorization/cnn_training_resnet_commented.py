@@ -88,9 +88,9 @@ CONFIG: Dict[str, Any] = {
     # --------------------------------------------------------
     # Filtragem de classes
     # --------------------------------------------------------
-    "TOP_CLASS_FRACTION": 0.01,       # top fração de classes mais frequentes
+    "TOP_CLASS_FRACTION": 1.00,       # top fração de classes mais frequentes
     # K-fold cross-validation [Kohavi1995][Stone1974].
-    "KFOLDS": 5,
+    "KFOLDS": 2,
     # Seed p/ reprodutibilidade; ver boas práticas em [Goodfellow2016].
     "SEED": 42,
 

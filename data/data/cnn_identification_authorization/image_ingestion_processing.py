@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt
 # =========================
 # CONFIGURAÇÕES
 # =========================
-TARGET_SIZE = 256  # resolução arbitrária (comece com 256)
+TARGET_SIZE = 128  # resolução arbitrária (comece com 256)
 SQUARE_CROP = True  # evita distorção (crop central p/ quadrado antes do resize)
 JPEG_QUALITY = 95
 
@@ -43,7 +43,7 @@ PERCENT_IMAGES = 1.00   # 1.0 = 100%
 MAX_IMAGES = None       # ex.: 5000 (ou None)
 
 # (Opcional) filtrar para as classes mais frequentes (para reduzir custo)
-TOP_CLASS_FRACTION = 0.05  # 1.0 = mantém todas as classes; ex.: 0.20 mantém top 20%
+TOP_CLASS_FRACTION = 0.20  # 1.0 = mantém todas as classes; ex.: 0.20 mantém top 20%
 
 # Amostras visuais
 N_SHOW_SAMPLES = 5
